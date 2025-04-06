@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 import matplotlib.pyplot as plt
+import torch
+from torch.utils.data import Dataset, DataLoader
 
 def create_particles_h5(file_names: list[str], hdf5_filename: str, warns: bool) -> list[list[int]]:
     """
@@ -430,3 +432,100 @@ def get_train_test(file_name: str, new_file: str) -> None:
 
             test_pics_dset.resize(test_pics_dset.shape[0] + test_pics.shape[0], axis=0)
             test_pics_dset[-test_pics.shape[0]:] = test_pics
+
+
+
+def get_mean_variance(hdf5_filename: str, structure_name: str, features_indeces: list[int]) -> list[tuple[int]]:
+    """
+    Батчами вычисляем среднее и дисперсию для выбранных признаков
+
+    Args:
+    hdf5_filename (str) - название h5-файла с train и test датасетами
+    features_indeces (list[int])  - индексы выбранных признаков
+    structure_name (str) - файл со структурой признаков
+
+    Return:
+
+    list[tuple[int]] - массив размером len(features_indeces) x 2, (среднее, дисперсия)
+
+
+    """
+
+    with h5py.File(hdf5_filename, "r") as hdf5_file, open(structure_name, "r") as file_struct:
+        struct = file_struct.readlines()
+        columns = struct[0].split(sep = ',')
+        columns = [column.strip() for column in columns] # len(columns) = 19
+
+
+        batch_size = 10000
+        train_len = hdf5_file['train']['headers'].shape[0]
+
+        mean_variance = []
+        for feature_index in features_indeces:
+            sum_x = 0
+            sum_x2 = 0
+            count = 0
+
+            for i in range(0, train_len, batch_size):
+                batch = hdf5_file['train']['headers'][i:i+batch_size, feature_index]
+                
+                sum_x += np.sum(batch)
+                sum_x2 += np.sum(batch ** 2)
+                count += len(batch)
+
+            mean = sum_x / count
+            variance = (sum_x2 / count) - mean ** 2
+
+            mean_variance.append((mean, np.sqrt(variance)))
+
+    return mean_variance
+
+
+def get_target(particle_type):
+    """
+    Функция для преобразования particle type в метку (0 - gamma, 1 - proton)
+
+    """
+    if particle_type == 14.0:
+        return 1  # proton
+    elif particle_type == 1.0:
+        return 0  # gamma
+    else:
+        return -1
+
+
+def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: list[int]) -> CustomDataset:
+    """
+    Возвращает датасет, пригодный для подачи в нейросеть
+
+    """
+    class CustomDataset(Dataset):
+        def __init__(self, file_path, structure_name, group_name, features_indeces):
+            self.file_path = file_path
+            self.group_name = group_name
+            self.features_indeces = features_indeces
+            self.mean_variance = get_mean_variance(file_path, structure_name, features_indeces)
+
+            with h5py.File(self.file_path, 'r') as f:
+                self.length = f[group_name]['headers'].shape[0]
+
+        def __len__(self):
+            return self.length
+
+        def __getitem__(self, idx):
+            with h5py.File(self.file_path, 'r') as f:
+                header = f[self.group_name]['headers'][idx]
+                pic = f[self.group_name]['pics_interp'][idx]
+
+            features = [ (header[ind] - self.mean_variance[i][0]) / self.mean_variance[i][1] for i, ind in enumerate(features_indeces)]
+            
+            particle_type = header[5] 
+            target = get_target(particle_type)
+
+            pic_tensor = torch.tensor(pic, dtype=torch.float32)
+            features_tensor = torch.tensor(features, dtype=torch.float32)
+
+            return pic_tensor, features_tensor, target
+
+    return CustomDataset(file_path, structure_name, group_name, features_indeces)
+
