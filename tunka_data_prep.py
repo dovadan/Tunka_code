@@ -150,7 +150,7 @@ def get_points(coords_filename: str) -> np.ndarray:
 
     return points
 
-def vals_to_pic_interp(points: np.ndarray, vals: np.ndarray, grid_size: int) -> np.ndarray:
+def vals_to_pic_interp(points: np.ndarray, vals: np.ndarray, grid_size: int, fill_value: float) -> np.ndarray:
     """
     Преобразует значения с каждого детектора в картинку, пригодную для обработки сверточной сетью
     с использование кубической интерполяции на сетке с помощью griddata из scipy.
@@ -162,6 +162,7 @@ def vals_to_pic_interp(points: np.ndarray, vals: np.ndarray, grid_size: int) -> 
             Размер 19 x 5 (номер детектора, lg(расстояние до оси ШАЛ для наземного детектора),
             lg(ro_el), lg(ro_mu), lg(расстояние до оси ШАЛ для подземного детектора)
         grid_size(int) - размер сетки по осям X и Y
+        fill_value (float) - значение, которым заполняются пропущенные показания детекторов
 
 
     Returns:
@@ -173,15 +174,20 @@ def vals_to_pic_interp(points: np.ndarray, vals: np.ndarray, grid_size: int) -> 
     grid_layers = []
     for i in range(1, 5):
         vals_layer = vals[:, i]
+        for j in range(19):
+            if vals_layer[j] == -10.0:
+                vals_layer[j] = fill_value
+
+
         grid_y, grid_x = np.mgrid[-500:500:complex(grid_size), -500:500:complex(grid_size)]
-        grid_values = griddata(coords, vals_layer, (grid_x, grid_y), method = 'cubic', fill_value = -10.0)
+        grid_values = griddata(coords, vals_layer, (grid_x, grid_y), method = 'cubic', fill_value = fill_value)
         grid_layers.append(grid_values)
 
     tensor = np.stack(grid_layers, axis=0)
     return tensor
 
 
-def batch_vals_to_pic_interp(points: np.ndarray, grid_size: int, batch_vals: np.ndarray) -> np.ndarray:
+def batch_vals_to_pic_interp(points: np.ndarray, grid_size: int, batch_vals: np.ndarray, fill_value: float) -> np.ndarray:
     """
     Берет батч из событий с детекторов n x 19 x 5 (в 5 один индекс соответствует номеру детектора, его убираем)
     Возвращает батч из тензоров  для сверточной нейросети, полученных с помощью griddata из scipy
@@ -191,6 +197,7 @@ def batch_vals_to_pic_interp(points: np.ndarray, grid_size: int, batch_vals: np.
         points (np.ndarray) - координаты детекторов. Размер 19 x 3 (номер детектора, x, y)
         grid_size(int) - размер сетки по осям X и Y
         batch_vals (np.ndarray) - батч из значений детекторов. Размер n x 19 x 5
+        fill_value (float) - значение, которым заполняются пропущенные показания детекторов
 
     Returns:
         np.ndarray - батч из тензоров размера n x 4 x grid_size x grid_size
@@ -198,11 +205,11 @@ def batch_vals_to_pic_interp(points: np.ndarray, grid_size: int, batch_vals: np.
     """
 
 
-    batch_pics = [vals_to_pic_interp(points, vals, grid_size) for vals in batch_vals]
+    batch_pics = [vals_to_pic_interp(points, vals, grid_size, fill_value) for vals in batch_vals]
 
     return np.stack(batch_pics)
 
-def vals_to_pic(vals: np.ndarray) -> np.ndarray:
+def vals_to_pic(vals: np.ndarray, fill_value: float) -> np.ndarray:
     """
     Преобразует значения с каждого детектора в картинку, пригодную для обработки сверточной сетью
     с помощью дополнения шестиугольника из детекторов до параллелограмма.
@@ -212,6 +219,7 @@ def vals_to_pic(vals: np.ndarray) -> np.ndarray:
             -10.0 означает несрабатывание выбранного детектора.
             Размер 19 x 5 (номер детектора, lg(расстояние до оси ШАЛ для наземного детектора),
             lg(ro_el), lg(ro_mu), lg(расстояние до оси ШАЛ для подземного детектора)
+        fill_value (float) - значение, которым заполняются пропущенные показания детекторов
 
 
     Returns:
@@ -240,18 +248,22 @@ def vals_to_pic(vals: np.ndarray) -> np.ndarray:
         19 : (0,0),
     }
 
-    tensor = np.full((4, 5, 5), -10.0)
-
+    tensor = np.full((4, 5, 5), fill_value)
     for i in range(1, 5):
         vals_layer = vals[:, i]
         for j in range(19):
             x, y = num_to_ind[j + 1]
-            tensor[i - 1][y][x] = vals_layer[j]
+
+            if vals_layer[j] == -10.0:
+                tensor[i - 1][y][x] = fill_value
+            else:
+                tensor[i - 1][y][x] = vals_layer[j]
+
 
     return tensor
 
 
-def batch_vals_to_pic(batch_vals: np.ndarray) -> np.ndarray:
+def batch_vals_to_pic(batch_vals: np.ndarray, fill_value: float) -> np.ndarray:
     """
     Берет батч из событий с детекторов n x 19 x 5 (в 5 один индекс соответствует номеру детектора, его убираем)
     Возвращает батч из тензоров  для сверточной нейросети, полученных с помощью дополнения сетки детекторов до параллелограмма
@@ -259,19 +271,20 @@ def batch_vals_to_pic(batch_vals: np.ndarray) -> np.ndarray:
 
     Args:
         batch_vals (np.ndarray) - батч из значений детекторов. Размер n x 19 x 5
+        fill_value (float) - значение, которым заполняются пропущенные показания детекторов
 
     Returns:
         np.ndarray - батч из тензоров размера n x 4 x 5 x 5
 
     """
 
-    batch_pics = [vals_to_pic(vals) for vals in batch_vals]
+    batch_pics = [vals_to_pic(vals, fill_value) for vals in batch_vals]
 
     return np.stack(batch_pics)
 
 
 
-def visualise_grid_interp(points: np.ndarray, grid_values: np.ndarray) -> None:
+def visualise_grid_interp(points: np.ndarray, grid_values: np.ndarray, center = (-1000, -1000)) -> None:
     coords = points[:, 1 : 3]
     plt.figure(figsize=(8, 8))
     plt.imshow(grid_values, origin = 'lower', extent=(-500, 500, -500, 500), cmap='viridis', interpolation='none')
@@ -283,6 +296,10 @@ def visualise_grid_interp(points: np.ndarray, grid_values: np.ndarray) -> None:
     for point in points:
         plt.scatter(point[1], point[2], color = 'black', label = point[0])
         plt.text(point[1] + 10, point[2] + 10, f'{point[0]:.0f}', fontsize=9, color='red', ha='center', va='center')
+
+    if center != (-1000, -1000):
+        plt.scatter(center[0], center[1], marker = 'x', color = 'red', s = 150)
+
     plt.show()
 
 def visualise_grid(grid_values: np.ndarray) -> None:
@@ -294,6 +311,7 @@ def visualise_grid(grid_values: np.ndarray) -> None:
     plt.ylabel('Y')
     plt.grid(True)
     plt.show()
+
 
 def get_train_test(file_name: str, new_file: str) -> None:
     """
@@ -308,6 +326,8 @@ def get_train_test(file_name: str, new_file: str) -> None:
     Returns:
 
     """
+    np.random.seed(42)
+
     batch_size = 1000
 
     with h5py.File(file_name, 'r') as hdf5_file, h5py.File(new_file, 'w') as new_hdf5:
@@ -317,6 +337,7 @@ def get_train_test(file_name: str, new_file: str) -> None:
         min_size = min(gamma_size, proton_size)
 
         grid_size = 10
+        fill_value = -10.0
 
         train_group = new_hdf5.create_group('train')
         test_group = new_hdf5.create_group('test')
@@ -376,8 +397,8 @@ def get_train_test(file_name: str, new_file: str) -> None:
 
             # преобразуем батч из data_blocks в пригодные для сверточной сети тензоры,
             # полученные двумя разными способами: с интерполяцией и без
-            pics_interp = batch_vals_to_pic_interp(points, grid_size, data_blocks)
-            pics = batch_vals_to_pic(data_blocks)
+            pics_interp = batch_vals_to_pic_interp(points, grid_size, data_blocks, fill_value)
+            pics = batch_vals_to_pic(data_blocks, fill_value)
 
             print(pics_interp.shape)
             print(pics.shape)
@@ -409,5 +430,3 @@ def get_train_test(file_name: str, new_file: str) -> None:
 
             test_pics_dset.resize(test_pics_dset.shape[0] + test_pics.shape[0], axis=0)
             test_pics_dset[-test_pics.shape[0]:] = test_pics
-
-
