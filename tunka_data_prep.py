@@ -494,7 +494,7 @@ def get_target(particle_type):
         return -1
 
 
-def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: list[int]) -> CustomDataset:
+def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: list[int]):
     """
     Возвращает датасет, пригодный для подачи в нейросеть
 
@@ -504,22 +504,35 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
             self.file_path = file_path
             self.group_name = group_name
             self.features_indeces = features_indeces
+
             self.mean_variance = get_mean_variance(file_path, structure_name, features_indeces)
+            
+            self._file = None
+            self.headers = None
+            self.pics_interp = None
 
             with h5py.File(self.file_path, 'r') as f:
-                self.length = f[group_name]['headers'].shape[0]
+                self.length = f[self.group_name]['headers'].shape[0]
+
+        def _init_file(self):
+            if self._file is None:
+                self._file = h5py.File(self.file_path, 'r', swmr=True)
+                self.headers = self._file[self.group_name]['headers']
+                self.pics_interp = self._file[self.group_name]['pics_interp']
 
         def __len__(self):
             return self.length
 
         def __getitem__(self, idx):
-            with h5py.File(self.file_path, 'r') as f:
-                header = f[self.group_name]['headers'][idx]
-                pic = f[self.group_name]['pics_interp'][idx]
-
-            features = [ (header[ind] - self.mean_variance[i][0]) / self.mean_variance[i][1] for i, ind in enumerate(features_indeces)]
+            self._init_file()
             
-            particle_type = header[5] 
+            header = self.headers[idx]
+            pic = self.pics_interp[idx]
+
+            features = [ (header[ind] - self.mean_variance[i][0]) / self.mean_variance[i][1]
+                        for i, ind in enumerate(self.features_indeces) ]
+            
+            particle_type = header[5]
             target = get_target(particle_type)
 
             pic_tensor = torch.tensor(pic, dtype=torch.float32)
@@ -527,5 +540,19 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
 
             return pic_tensor, features_tensor, target
 
-    return CustomDataset(file_path, structure_name, group_name, features_indeces)
+        def __del__(self):
+            if self._file is not None:
+                self._file.close()
 
+        def __getstate__(self):
+            # Исключаем открытый файл из сериализации
+            state = self.__dict__.copy()
+            state['_file'] = None
+            state['headers'] = None
+            state['pics_interp'] = None
+            return state
+
+        def __setstate__(self, state):
+            self.__dict__.update(state)
+
+    return CustomDataset(file_path, structure_name, group_name, features_indeces)
