@@ -315,7 +315,7 @@ def visualise_grid(grid_values: np.ndarray) -> None:
     plt.show()
 
 
-def get_train_test(file_name: str, new_file: str) -> None:
+def get_train_test(file_name: str, new_file: str, grid_size: int = 10, fill_value: float = -1.0, batch_size: int = 1000) -> None:
     """
     Создает new_file.h5 с train и test датасетами, состоящими из перемешанных протонных и фотонных событий.
     В каждом датасете соотношения протонных и фотонных событий 1 к 1.
@@ -324,22 +324,20 @@ def get_train_test(file_name: str, new_file: str) -> None:
     Args:
         file_name (str) - имя входного файла
         new_file (str) - имя выходного файла
+        grid_size (int) - размер сетки
+        fill_value (float) - чем заполнять значения несработавших детекторов
+        batch_size (int) - размер батча для считывания из h5-файла
 
     Returns:
 
     """
     np.random.seed(42)
 
-    batch_size = 1000
-
     with h5py.File(file_name, 'r') as hdf5_file, h5py.File(new_file, 'w') as new_hdf5:
         gamma_size = hdf5_file['gamma/headers'].shape[0]
         proton_size = hdf5_file['proton/headers'].shape[0]
 
         min_size = min(gamma_size, proton_size)
-
-        grid_size = 10
-        fill_value = -10.0
 
         train_group = new_hdf5.create_group('train')
         test_group = new_hdf5.create_group('test')
