@@ -494,7 +494,7 @@ def get_target(particle_type):
 
 def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: list[int]):
     """
-    Возвращает датасет, пригодный для подачи в нейросеть
+    Возвращает датасет, пригодный для подачи в нейросеть без нормализации картинки
 
     """
     class CustomDataset(Dataset):
@@ -503,8 +503,6 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
             self.group_name = group_name
             self.features_indeces = features_indeces
 
-            self.mean_variance = get_mean_variance(file_path, structure_name, features_indeces)
-            
             self._file = None
             self.headers = None
             self.pics_interp = None
@@ -513,7 +511,7 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
                 self.length = f[self.group_name]['headers'].shape[0]
 
         def _init_file(self):
-            if self._file is None:
+            if self._file is None: # если файл не открыт
                 self._file = h5py.File(self.file_path, 'r', swmr=True)
                 self.headers = self._file[self.group_name]['headers']
                 self.pics_interp = self._file[self.group_name]['pics_interp']
@@ -523,17 +521,17 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
 
         def __getitem__(self, idx):
             self._init_file()
-            
+
             header = self.headers[idx]
             pic = self.pics_interp[idx]
 
-            features = [ (header[ind] - self.mean_variance[i][0]) / self.mean_variance[i][1]
-                        for i, ind in enumerate(self.features_indeces) ]
-            
             particle_type = header[5]
             target = get_target(particle_type)
 
             pic_tensor = torch.tensor(pic, dtype=torch.float32)
+
+            features = [header[ind] for ind in self.features_indeces]
+            
             features_tensor = torch.tensor(features, dtype=torch.float32)
 
             return pic_tensor, features_tensor, target
@@ -554,3 +552,46 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
             self.__dict__.update(state)
 
     return CustomDataset(file_path, structure_name, group_name, features_indeces)
+
+def normalize_fit(dataset: Dataset) -> tuple[np.ndarray]:
+    """
+    Считаем среднее и дисперсию картинок по выборке dataset для каждого канала.
+    Усреднение ведется по размеру батча, ширине и высоте картинки.
+
+    Возвращает среднее и стандартное отклонение для каждого канала
+
+    """
+    dataset_len = dataset.pics_interp.shape[0]
+    c = dataset.pics_interp.shape[1]
+    h = dataset.pics_interp.shape[2]
+    w = dataset.pics_interp.shape[3]
+
+    channel_sum = np.zeros(c, dtype = np.float64)
+    channel_squared_sum = np.zeros(c, dtype = np.float64)
+    n_pixels = 0
+
+    batch_size = 1000
+
+    for i in range(0, dataset_len, batch_size):
+        batch = dataset.pics_interp[i:i+batch_size] # [1000, 4, 10, 10]
+        batch_size = batch.shape[0]
+        n_pixels += batch_size * h * w
+
+        channel_sum += batch.sum(axis=(0, 2, 3))
+        channel_squared_sum += (batch ** 2).sum(axis=(0, 2, 3))  # (C,)
+
+
+    mean = channel_sum / n_pixels
+    std = np.sqrt(channel_squared_sum / n_pixels - mean ** 2)
+
+    return mean, std
+
+
+def normalize_transform(dataset: Dataset, mean: np.ndarray, std: np.ndarray) -> None:
+    """
+    Нормализует значение каждого канала на среднее 0 и дисперсию 1
+
+    """
+    dataset.pics_interp -= mean[None, :, None, None]
+    dataset.pics_interp /= std[None, :, None, None]
+
