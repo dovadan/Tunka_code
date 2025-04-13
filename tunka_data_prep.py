@@ -176,7 +176,7 @@ def vals_to_pic_interp(points: np.ndarray, table_vals: np.ndarray, vals: np.ndar
     coords = points[:, 1 : 3]
     grid_layers = []
 
-    # найдем расстояние от j-го до оси ШАЛ
+    # найдем расстояние от j-го детектора до оси ШАЛ
     vals_r_layer = np.zeros(19)
     theta = np.deg2rad(table_vals[3]) # восстановленные углы
     phi =  np.deg2rad(table_vals[4])
@@ -198,6 +198,10 @@ def vals_to_pic_interp(points: np.ndarray, table_vals: np.ndarray, vals: np.ndar
     for i in range(1, 5):
         if i % 2 != 0: # обрабатываем слои с расстояниями r
             vals_layer = vals_r_layer
+            # код ниже для отладки
+            # for j in range(19):
+            #     if vals[j, 1] != -10.0:
+            #         print(vals_layer[j], vals[j, 1])
         
         else: # обрабатываем слои с плотностями rho
             vals_layer = vals[:, i]
@@ -238,12 +242,14 @@ def batch_vals_to_pic_interp(points: np.ndarray, grid_size: int, batch_table_val
 
     return np.stack(batch_pics)
 
-def vals_to_pic(vals: np.ndarray, fill_value: float) -> np.ndarray:
+def vals_to_pic(table_vals: np.ndarray, vals: np.ndarray, fill_value: float) -> np.ndarray:
     """
     Преобразует значения с каждого детектора в картинку, пригодную для обработки сверточной сетью
     с помощью дополнения шестиугольника из детекторов до параллелограмма.
 
     Args:
+        points (np.ndarray) - координаты детекторов. Размер 19 x 3 (номер детектора, x, y)
+        table_vals (np.ndarray) - табличные значения (нужны для восстановления расстояний от детекторов до оси ШАЛ). Размер 19 x 1
         vals (np.ndarray) - массив со значениями измеренных величин для каждого детектора.
             -10.0 означает несрабатывание выбранного детектора.
             Размер 19 x 5 (номер детектора, lg(расстояние до оси ШАЛ для наземного детектора),
@@ -255,6 +261,7 @@ def vals_to_pic(vals: np.ndarray, fill_value: float) -> np.ndarray:
         np.ndarray - тензор размера 4 x 5 x 5
 
     """
+    coords = points[:, 1 : 3]
     num_to_ind = {
         1 : (2,2),
         2 : (1,1),
@@ -278,27 +285,60 @@ def vals_to_pic(vals: np.ndarray, fill_value: float) -> np.ndarray:
     }
 
     tensor = np.full((4, 5, 5), fill_value)
-    for i in range(1, 5):
-        vals_layer = vals[:, i]
-        for j in range(19):
-            x, y = num_to_ind[j + 1]
 
-            if vals_layer[j] == -10.0:
-                tensor[i - 1][y][x] = fill_value
-            else:
+    # найдем расстояние от j-го детектора до оси ШАЛ
+    vals_r_layer = np.zeros(19)
+    theta = np.deg2rad(table_vals[3]) # восстановленные углы
+    phi =  np.deg2rad(table_vals[4])
+    last_x = table_vals[10]
+    last_y = table_vals[11]
+
+    n = np.array([np.sin(theta)*np.cos(phi), np.sin(theta)*np.sin(phi), np.cos(theta)])
+    for j in range(19):
+        x_i = coords[j, 0]
+        y_i = coords[j, 1]
+
+        a_j = np.array([x_i - last_x, y_i - last_y, 0])
+        l_j = np.linalg.norm(a_j - np.dot(a_j, n) * n)
+        lg_l_j = np.log10(l_j)
+
+        vals_r_layer[j] = round(lg_l_j, 2)
+
+    for i in range(1, 5):
+        if i % 2 != 0: # обрабатываем слои с расстояниями r
+            vals_layer = vals_r_layer
+
+            for j in range(19):
+                x, y = num_to_ind[j + 1]
                 tensor[i - 1][y][x] = vals_layer[j]
 
+            # код ниже для отладки
+            # for j in range(19):
+            #     if vals[j, 1] != -10.0:
+            #         print(vals_layer[j], vals[j, 1])
+
+        else: # обрабатываем слои с плотноятми rho
+            vals_layer = vals[:, i]
+            for j in range(19):
+                x, y = num_to_ind[j + 1]
+
+                if vals_layer[j] == -10.0:
+                    tensor[i - 1][y][x] = fill_value
+                else:
+                    tensor[i - 1][y][x] = vals_layer[j]
 
     return tensor
 
 
-def batch_vals_to_pic(batch_vals: np.ndarray, fill_value: float) -> np.ndarray:
+def batch_vals_to_pic(points: np.ndarray, batch_table_vals: np.ndarray, batch_vals: np.ndarray, fill_value: float) -> np.ndarray:
     """
     Берет батч из событий с детекторов n x 19 x 5 (в 5 один индекс соответствует номеру детектора, его убираем)
     Возвращает батч из тензоров  для сверточной нейросети, полученных с помощью дополнения сетки детекторов до параллелограмма
     Размер n x 4 x 5 x 5, где n - число элементов в батче
 
     Args:
+        points (np.ndarray) - координаты детекторов. Размер 19 x 3 (номер детектора, x, y)
+        batch_table_vals (np.ndarray) - батч из восстановленных значений. Размер n x 19
         batch_vals (np.ndarray) - батч из значений детекторов. Размер n x 19 x 5
         fill_value (float) - значение, которым заполняются пропущенные показания детекторов
 
@@ -307,7 +347,7 @@ def batch_vals_to_pic(batch_vals: np.ndarray, fill_value: float) -> np.ndarray:
 
     """
 
-    batch_pics = [vals_to_pic(vals, fill_value) for vals in batch_vals]
+    batch_pics = [vals_to_pic(table_vals, vals, fill_value) for table_vals, vals in zip(batch_table_vals, batch_vals)]
 
     return np.stack(batch_pics)
 
