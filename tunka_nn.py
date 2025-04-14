@@ -14,12 +14,16 @@ def train(model, train_loader, criterion, optimizer, reg = False):
     model.train()
     running_loss = 0.0
     for image, data, labels in train_loader:
+        image = image.to(device)
+        data = data.to(device)
+
         optimizer.zero_grad()
         preds = model(image, data)
 
         # преобразуем класс 0 в вектор (1.0, 0.0), а класс 1 в вектор (0.0, 1.0)
         labels = torch.eye(2)[labels]
         labels = labels.float()
+        labels = labels.to(device)
 
         loss = criterion(preds, labels) * len(labels)
         loss.backward()
@@ -33,11 +37,14 @@ def evaluate(model, val_loader, criterion):
     running_loss =0.0
     with torch.no_grad():
         for image, data, labels in val_loader:
+            image = image.to(device)
+            data = data.to(device)
             preds = model(image, data)
 
             # преобразуем класс 0 в вектор (1.0, 0.0), а класс 1 в вектор (0.0, 1.0)
             labels = torch.eye(2)[labels]
             labels = labels.float()
+            labels = labels.to(device)
 
             loss = criterion(preds, labels) * len(labels)
             running_loss += loss.item()
@@ -97,7 +104,6 @@ def plot_roc(model, test_loader):
     plt.legend(loc='lower right')
     plt.grid()
     plt.show()
-
 
 def get_weights(model, features_indeces, columns):
     first_linear = model.fc[0]  # nn.Linear(32 + 7, 64)
