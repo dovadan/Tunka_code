@@ -152,7 +152,8 @@ def get_points(coords_filename: str) -> np.ndarray:
 
     return points
 
-def vals_to_pic_interp(points: np.ndarray, table_vals: np.ndarray, vals: np.ndarray, grid_size: int, fill_value: float) -> np.ndarray:
+def vals_to_pic(points: np.ndarray, table_vals: np.ndarray, vals: np.ndarray, 
+                       grid_size: int, fill_value: float, interp: bool = True) -> np.ndarray:
     """
     Преобразует значения с каждого детектора в картинку, пригодную для обработки сверточной сетью
     с использование кубической интерполяции на сетке с помощью griddata из scipy.
@@ -166,60 +167,130 @@ def vals_to_pic_interp(points: np.ndarray, table_vals: np.ndarray, vals: np.ndar
         table_vals (np.ndarray) - табличные значения (нужны для восстановления расстояний от детекторов до оси ШАЛ). Размер 19 x 1
         grid_size(int) - размер сетки по осям X и Y
         fill_value (float) - значение, которым заполняются пропущенные показания детекторов
+        interp(bool) - с интерполяцией или нет
 
 
     Returns:
         np.ndarray - тензор размера 4 x grid_size x grid_size
 
     """
+    if interp:
+        coords = points[:, 1 : 3]
+        grid_layers = []
 
-    coords = points[:, 1 : 3]
-    grid_layers = []
+        # найдем расстояние от j-го детектора до оси ШАЛ
+        vals_r_layer = np.zeros(19)
+        theta = np.deg2rad(table_vals[3]) # восстановленные углы
+        phi =  np.deg2rad(table_vals[4])
+        last_x = table_vals[10]
+        last_y = table_vals[11]
 
-    # найдем расстояние от j-го детектора до оси ШАЛ
-    vals_r_layer = np.zeros(19)
-    theta = np.deg2rad(table_vals[3]) # восстановленные углы
-    phi =  np.deg2rad(table_vals[4])
-    last_x = table_vals[10]
-    last_y = table_vals[11]
+        n = np.array([np.sin(theta)*np.cos(phi), np.sin(theta)*np.sin(phi), np.cos(theta)])
+        for j in range(19):
+            x_i = coords[j, 0]
+            y_i = coords[j, 1]
 
-    n = np.array([np.sin(theta)*np.cos(phi), np.sin(theta)*np.sin(phi), np.cos(theta)])
-    for j in range(19):
-        x_i = coords[j, 0]
-        y_i = coords[j, 1]
+            a_j = np.array([x_i - last_x, y_i - last_y, 0])
+            l_j = np.linalg.norm(a_j - np.dot(a_j, n) * n)
+            lg_l_j = np.log10(l_j)
 
-        a_j = np.array([x_i - last_x, y_i - last_y, 0])
-        l_j = np.linalg.norm(a_j - np.dot(a_j, n) * n)
-        lg_l_j = np.log10(l_j)
-
-        vals_r_layer[j] = round(lg_l_j, 2)
-
-
-    for i in range(1, 5):
-        if i % 2 != 0: # обрабатываем слои с расстояниями r
-            vals_layer = vals_r_layer
-            # код ниже для отладки
-            # for j in range(19):
-            #     if vals[j, 1] != -10.0:
-            #         print(vals_layer[j], vals[j, 1])
-        
-        else: # обрабатываем слои с плотностями rho
-            vals_layer = vals[:, i]
-            for j in range(19):
-                if vals_layer[j] == -10.0:
-                    vals_layer[j] = fill_value
+            vals_r_layer[j] = round(lg_l_j, 2)
 
 
-        grid_y, grid_x = np.mgrid[-500:500:complex(grid_size), -500:500:complex(grid_size)]
-        grid_values = griddata(coords, vals_layer, (grid_x, grid_y), method = 'cubic', fill_value = fill_value)
-        grid_layers.append(grid_values)
+        for i in range(1, 5):
+            if i % 2 != 0: # обрабатываем слои с расстояниями r
+                vals_layer = vals_r_layer
+                # код ниже для отладки
+                # for j in range(19):
+                #     if vals[j, 1] != -10.0:
+                #         print(vals_layer[j], vals[j, 1])
 
-    tensor = np.stack(grid_layers, axis=0)
-    return tensor
+            else: # обрабатываем слои с плотностями rho
+                vals_layer = vals[:, i]
+                for j in range(19):
+                    if vals_layer[j] == -10.0:
+                        vals_layer[j] = fill_value
 
 
-def batch_vals_to_pic_interp(points: np.ndarray, grid_size: int, batch_table_vals, 
-                             batch_vals: np.ndarray, fill_value: float) -> np.ndarray:
+            grid_y, grid_x = np.mgrid[-500:500:complex(grid_size), -500:500:complex(grid_size)]
+            grid_values = griddata(coords, vals_layer, (grid_x, grid_y), method = 'cubic', fill_value = fill_value)
+            grid_layers.append(grid_values)
+
+        tensor = np.stack(grid_layers, axis=0)
+        return tensor
+    
+    else:
+        coords = points[:, 1 : 3]
+        num_to_ind = {
+            1 : (2,2),
+            2 : (1,1),
+            3 : (2,1),
+            4 : (3,2),
+            5 : (3,3),
+            6 : (2,3),
+            7 : (1,2),
+            8 : (1,0),
+            9 : (2,0),
+            10 : (3,1),
+            11 : (4,2),
+            12 : (4,3),
+            13 : (4,4),
+            14 : (3,4),
+            15 : (2,4),
+            16 : (1,3),
+            17 : (0,2),
+            18 : (0,1),
+            19 : (0,0),
+        }
+
+        tensor = np.full((4, 5, 5), fill_value)
+
+        # найдем расстояние от j-го детектора до оси ШАЛ
+        vals_r_layer = np.zeros(19)
+        theta = np.deg2rad(table_vals[3]) # восстановленные углы
+        phi =  np.deg2rad(table_vals[4])
+        last_x = table_vals[10]
+        last_y = table_vals[11]
+
+        n = np.array([np.sin(theta)*np.cos(phi), np.sin(theta)*np.sin(phi), np.cos(theta)])
+        for j in range(19):
+            x_i = coords[j, 0]
+            y_i = coords[j, 1]
+
+            a_j = np.array([x_i - last_x, y_i - last_y, 0])
+            l_j = np.linalg.norm(a_j - np.dot(a_j, n) * n)
+            lg_l_j = np.log10(l_j)
+
+            vals_r_layer[j] = round(lg_l_j, 2)
+
+        for i in range(1, 5):
+            if i % 2 != 0: # обрабатываем слои с расстояниями r
+                vals_layer = vals_r_layer
+
+                for j in range(19):
+                    x, y = num_to_ind[j + 1]
+                    tensor[i - 1][y][x] = vals_layer[j]
+
+                # код ниже для отладки
+                # for j in range(19):
+                #     if vals[j, 1] != -10.0:
+                #         print(vals_layer[j], vals[j, 1])
+
+            else: # обрабатываем слои с плотноятми rho
+                vals_layer = vals[:, i]
+                for j in range(19):
+                    x, y = num_to_ind[j + 1]
+
+                    if vals_layer[j] == -10.0:
+                        tensor[i - 1][y][x] = fill_value
+                    else:
+                        tensor[i - 1][y][x] = vals_layer[j]
+
+        return tensor
+
+
+def batch_vals_to_pic(points: np.ndarray, grid_size: int, batch_table_vals,
+                             batch_vals: np.ndarray, fill_value: float, interp: bool = True) -> np.ndarray:
     """
     Берет батч из событий с детекторов n x 19 x 5 (в 5 один индекс соответствует номеру детектора, его убираем)
     Возвращает батч из тензоров  для сверточной нейросети, полученных с помощью griddata из scipy
@@ -237,120 +308,8 @@ def batch_vals_to_pic_interp(points: np.ndarray, grid_size: int, batch_table_val
 
     """
 
-
-    batch_pics = [vals_to_pic_interp(points, table_vals, vals, grid_size, fill_value) for table_vals, vals in zip(batch_table_vals, batch_vals)]
-
+    batch_pics = [vals_to_pic(points, table_vals, vals, grid_size, fill_value, interp) for table_vals, vals in zip(batch_table_vals, batch_vals)]
     return np.stack(batch_pics)
-
-def vals_to_pic(table_vals: np.ndarray, vals: np.ndarray, fill_value: float) -> np.ndarray:
-    """
-    Преобразует значения с каждого детектора в картинку, пригодную для обработки сверточной сетью
-    с помощью дополнения шестиугольника из детекторов до параллелограмма.
-
-    Args:
-        points (np.ndarray) - координаты детекторов. Размер 19 x 3 (номер детектора, x, y)
-        table_vals (np.ndarray) - табличные значения (нужны для восстановления расстояний от детекторов до оси ШАЛ). Размер 19 x 1
-        vals (np.ndarray) - массив со значениями измеренных величин для каждого детектора.
-            -10.0 означает несрабатывание выбранного детектора.
-            Размер 19 x 5 (номер детектора, lg(расстояние до оси ШАЛ для наземного детектора),
-            lg(ro_el), lg(ro_mu), lg(расстояние до оси ШАЛ для подземного детектора)
-        fill_value (float) - значение, которым заполняются пропущенные показания детекторов
-
-
-    Returns:
-        np.ndarray - тензор размера 4 x 5 x 5
-
-    """
-    coords = points[:, 1 : 3]
-    num_to_ind = {
-        1 : (2,2),
-        2 : (1,1),
-        3 : (2,1),
-        4 : (3,2),
-        5 : (3,3),
-        6 : (2,3),
-        7 : (1,2),
-        8 : (1,0),
-        9 : (2,0),
-        10 : (3,1),
-        11 : (4,2),
-        12 : (4,3),
-        13 : (4,4),
-        14 : (3,4),
-        15 : (2,4),
-        16 : (1,3),
-        17 : (0,2),
-        18 : (0,1),
-        19 : (0,0),
-    }
-
-    tensor = np.full((4, 5, 5), fill_value)
-
-    # найдем расстояние от j-го детектора до оси ШАЛ
-    vals_r_layer = np.zeros(19)
-    theta = np.deg2rad(table_vals[3]) # восстановленные углы
-    phi =  np.deg2rad(table_vals[4])
-    last_x = table_vals[10]
-    last_y = table_vals[11]
-
-    n = np.array([np.sin(theta)*np.cos(phi), np.sin(theta)*np.sin(phi), np.cos(theta)])
-    for j in range(19):
-        x_i = coords[j, 0]
-        y_i = coords[j, 1]
-
-        a_j = np.array([x_i - last_x, y_i - last_y, 0])
-        l_j = np.linalg.norm(a_j - np.dot(a_j, n) * n)
-        lg_l_j = np.log10(l_j)
-
-        vals_r_layer[j] = round(lg_l_j, 2)
-
-    for i in range(1, 5):
-        if i % 2 != 0: # обрабатываем слои с расстояниями r
-            vals_layer = vals_r_layer
-
-            for j in range(19):
-                x, y = num_to_ind[j + 1]
-                tensor[i - 1][y][x] = vals_layer[j]
-
-            # код ниже для отладки
-            # for j in range(19):
-            #     if vals[j, 1] != -10.0:
-            #         print(vals_layer[j], vals[j, 1])
-
-        else: # обрабатываем слои с плотноятми rho
-            vals_layer = vals[:, i]
-            for j in range(19):
-                x, y = num_to_ind[j + 1]
-
-                if vals_layer[j] == -10.0:
-                    tensor[i - 1][y][x] = fill_value
-                else:
-                    tensor[i - 1][y][x] = vals_layer[j]
-
-    return tensor
-
-
-def batch_vals_to_pic(points: np.ndarray, batch_table_vals: np.ndarray, batch_vals: np.ndarray, fill_value: float) -> np.ndarray:
-    """
-    Берет батч из событий с детекторов n x 19 x 5 (в 5 один индекс соответствует номеру детектора, его убираем)
-    Возвращает батч из тензоров  для сверточной нейросети, полученных с помощью дополнения сетки детекторов до параллелограмма
-    Размер n x 4 x 5 x 5, где n - число элементов в батче
-
-    Args:
-        points (np.ndarray) - координаты детекторов. Размер 19 x 3 (номер детектора, x, y)
-        batch_table_vals (np.ndarray) - батч из восстановленных значений. Размер n x 19
-        batch_vals (np.ndarray) - батч из значений детекторов. Размер n x 19 x 5
-        fill_value (float) - значение, которым заполняются пропущенные показания детекторов
-
-    Returns:
-        np.ndarray - батч из тензоров размера n x 4 x 5 x 5
-
-    """
-
-    batch_pics = [vals_to_pic(table_vals, vals, fill_value) for table_vals, vals in zip(batch_table_vals, batch_vals)]
-
-    return np.stack(batch_pics)
-
 
 
 def visualise_grid_interp(points: np.ndarray, grid_values: np.ndarray, center = (-1000, -1000)) -> None:
