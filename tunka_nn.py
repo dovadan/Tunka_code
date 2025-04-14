@@ -137,103 +137,31 @@ class GammaProtonClassifier(nn.Module):
             nn.Conv2d(4, 16, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(2),  # 10 x 10 -> 5 x 5
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1)  # [batch_size, 32, 1, 1]
-        )
 
-        self.fc = nn.Sequential(
-            nn.Linear(32 + 7, 64),
-            nn.ReLU(),
-            nn.Linear(64, 2)
-        )
-
-
-    def forward(self, image, features):
-        x_img = self.conv_block(image)  # [batch_size, 32, 1, 1]
-        x_img = x_img.view(x_img.size(0), -1)  # [batch_size, 32]
-        x = torch.cat([x_img, features], dim=1)  # [batch_size, 39]
-        out = self.fc(x)
-        return out
-
- 
-class GammaProtonClassifier2(nn.Module):
-    def __init__(self):
-        super(GammaProtonClassifier2, self).__init__()
-
-        self.conv_block = nn.Sequential(
-            nn.Conv2d(4, 8, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),  # 10 x 10 -> 5 x 5
-            nn.Dropout2d(0.2),
-
-            nn.Conv2d(8, 12, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),  # 10 x 10 -> 5 x 5
-            nn.Dropout2d(0.2),
-
-            nn.Conv2d(12, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),  # [batch_size, 16, 1, 1]
-            nn.Dropout2d(0.2) 
-        )
-
-        self.fc = nn.Sequential(
-            nn.Linear(16 + 7, 46),
-            nn.ReLU(),
-            nn.Linear(46, 2)
-        )
-
-    def forward(self, image, features):
-        x_img = self.conv_block(image)  # [batch_size, 16, 1, 1]
-        x_img = x_img.view(x_img.size(0), -1)  # [batch_size, 16]
-        x = torch.cat([x_img, features], dim=1)  # [batch_size, 23]
-        out = self.fc(x)
-        return out
-
-class GammaProtonClassifier3(nn.Module):
-    def __init__(self):
-        super(GammaProtonClassifier2, self).__init__()
-
-        self.conv_block = nn.Sequential(
-            nn.ConstantPad2d(padding=1, value=-1.0),
-            nn.Conv2d(4, 8, kernel_size=3, padding=0),
-            nn.ReLU(),
-            nn.MaxPool2d(2),  # 10 x 10 -> 5 x 5
-            nn.Dropout2d(0.2),
-
-            nn.Conv2d(8, 12, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),  # 10 x 10 -> 5 x 5
-            nn.Dropout2d(0.2),
-
-            nn.Conv2d(12, 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),  # [batch_size, 16, 1, 1]
-            nn.Dropout2d(0.2)
-        )
-
-        self.fc = nn.Sequential(
-            nn.Linear(16 + 7, 46),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-
-            nn.Linear(46, 32),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-
-            nn.Linear(16, 2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1), # [batch_size, 32, 5, 5]
             nn.ReLU()
         )
 
+        self.ln = nn.LayerNorm(32 * 5 * 5 + 7)
+
+        self.fc = nn.Sequential(
+            nn.Linear(32 * 5 * 5 + 7, 2048),
+            nn.LayerNorm(2048),
+            nn.Tanh(),
+            nn.Dropout(p=0.4),
+
+            nn.Linear(2048, 1024),
+            nn.LayerNorm(1024),
+            nn.Tanh(),
+            nn.Dropout(p=0.4),
+
+            nn.Linear(1024, 2)
+        )
 
     def forward(self, image, features):
-        x_img = self.conv_block(image)  # [batch_size, 16, 1, 1]
-        x_img = x_img.view(x_img.size(0), -1)  # [batch_size, 16]
-        x = torch.cat([x_img, features], dim=1)  # [batch_size, 23]
+        x_img = self.conv_block(image)  # [batch_size, 32, 5, 5]
+        x_img = x_img.view(x_img.size(0), -1)  # [batch_size, 32*5*5]
+        x = torch.cat([x_img, features], dim=1)  # [batch_size, 32*5*5 + 7]
+        x = self.ln(x)
         out = self.fc(x)
         return out
