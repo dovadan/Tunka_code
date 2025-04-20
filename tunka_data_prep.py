@@ -520,16 +520,35 @@ def get_target(particle_type):
         return -1
 
 
-def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: list[int]):
+def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: list[int],
+                       normalize: bool,
+                       interp: bool, 
+                       skip: bool,
+                       mean: list[float], std: list[float], channel_mins: list[float], # игнорируется, если normalize == False
+                       bias: list[float]): # игнорируется, если skip == False
     """
-    Возвращает датасет, пригодный для подачи в нейросеть без нормализации картинки
+    Возвращает датасет, пригодный для подачи в нейросеть
+
+    normalize - нормировать или нет
+    skip - пропускаем или нет отсутствующие значения при нормировке. Если да, то в i-м канале они сдвинутся на bias[i]
+    interp - картинки с интерполяцией или нет
+    bias - сдвиги для несработавших детекторов (нужны, только если skip == True)
 
     """
     class CustomDataset(Dataset):
-        def __init__(self, file_path, structure_name, group_name, features_indeces):
+        def __init__(self, file_path, structure_name, group_name, features_indeces,
+                     normalize, skip, interp, mean, std, channel_mins, bias):
             self.file_path = file_path
             self.group_name = group_name
             self.features_indeces = features_indeces
+
+            self.normalize = normalize
+            self.skip = skip
+            self.interp = interp
+            self.mean = np.array(mean)
+            self.std = np.array(std)
+            self.channel_mins = np.array(channel_mins)
+            self.bias = np.array(bias)
 
             self._file = None
             self.headers = None
@@ -542,7 +561,10 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
             if self._file is None: # если файл не открыт
                 self._file = h5py.File(self.file_path, 'r', swmr=True)
                 self.headers = self._file[self.group_name]['headers']
-                self.pics_interp = self._file[self.group_name]['pics_interp']
+                if interp:
+                    self.pics_interp = self._file[self.group_name]['pics_interp']
+                else:
+                    self.pics_interp = self._file[self.group_name]['pics']
 
         def __len__(self):
             return self.length
@@ -551,16 +573,39 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
             self._init_file()
 
             header = self.headers[idx]
-            pic = self.pics_interp[idx]
 
-            particle_type = header[5]
-            target = get_target(particle_type)
+            pic = self.pics_interp[idx]
+            if self.normalize:
+                if self.skip:
+                    c, h, w = pic.shape
+
+                    channel_mins = np.broadcast_to(self.channel_mins[:, None, None], (c, h, w))
+                    bias = np.broadcast_to(self.bias[:, None, None], (c, h, w))
+                    mean = np.broadcast_to(self.mean[:, None, None], (c, h, w))
+                    std = np.broadcast_to(self.std[:, None, None], (c, h, w))
+
+                    # создаём маску, где значения меньше порога
+                    mask = pic < channel_mins 
+
+                    result = np.empty_like(pic)
+
+                    result[mask] = pic[mask] + bias[mask]
+                    result[~mask] = (pic[~mask] - mean[~mask]) / std[~mask]
+
+                    pic = result
+
+                else:
+                    for c in range(pic.shape[0]):
+                        pic[c] = (pic[c] - self.mean[c]) / self.std[c]
+
 
             pic_tensor = torch.tensor(pic, dtype=torch.float32)
 
             features = [header[ind] for ind in self.features_indeces]
-            
             features_tensor = torch.tensor(features, dtype=torch.float32)
+
+            particle_type = header[5]
+            target = get_target(particle_type)
 
             return pic_tensor, features_tensor, target
 
@@ -574,19 +619,24 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
             state['_file'] = None
             state['headers'] = None
             state['pics_interp'] = None
+            state['pics'] = None
             return state
 
         def __setstate__(self, state):
             self.__dict__.update(state)
 
-    return CustomDataset(file_path, structure_name, group_name, features_indeces)
+    return CustomDataset(file_path, structure_name, group_name, features_indeces,
+                     normalize, skip, interp, mean, std, channel_mins, bias)
 
-def normalize_fit(dataset: Dataset) -> tuple[np.ndarray]:
+def normalize_fit(dataset: Dataset, skip: bool = False, skip_value: float = -1.0) -> tuple[np.ndarray]:
     """
     Считаем среднее и дисперсию картинок по выборке dataset для каждого канала.
     Усреднение ведется по размеру батча, ширине и высоте картинки.
 
-    Возвращает среднее и стандартное отклонение для каждого канала
+    Возвращает среднее, стандартное отклонение и минимальное значение величины в каждом канале,
+    при этом при рассчете минимальных значений объекты со значением величины, равной skip_value, не учитываются
+
+    skip - пропускаем или нет пропущенные значения при подсчете среднего и дисперсии (но не минимумов)
 
     """
     dataset_len = dataset.pics_interp.shape[0]
@@ -594,32 +644,45 @@ def normalize_fit(dataset: Dataset) -> tuple[np.ndarray]:
     h = dataset.pics_interp.shape[2]
     w = dataset.pics_interp.shape[3]
 
-    channel_sum = np.zeros(c, dtype = np.float64)
+    channel_sum = np.zeros(c, dtype = np.float64) # для подсчета среднего и дисперсии
     channel_squared_sum = np.zeros(c, dtype = np.float64)
-    n_pixels = 0
+
+    channel_mins = np.full(c, 10**9, dtype = np.float64)  # массив из минимумов
+
+    valid_counts = np.zeros(c, dtype=np.int64) # для подсчета не маскированных значений в каждом канале
 
     batch_size = 1000
 
+    # предполагается, что пропущенные значения во всех каналах заполнены одним и тем же значением skip_value
     for i in range(0, dataset_len, batch_size):
         batch = dataset.pics_interp[i:i+batch_size] # [1000, 4, 10, 10]
-        batch_size = batch.shape[0]
-        n_pixels += batch_size * h * w
 
-        channel_sum += batch.sum(axis=(0, 2, 3))
-        channel_squared_sum += (batch ** 2).sum(axis=(0, 2, 3))  # (C,)
+        # для подсчета минимумов
+        masked = np.where(batch == skip_value, np.inf, batch)
+        min_vals = masked.min(axis = (0, 2, 3))
 
-
-    mean = channel_sum / n_pixels
-    std = np.sqrt(channel_squared_sum / n_pixels - mean ** 2)
-
-    return mean, std
+        for j in range(c): # обновляем минимумы в каждом канале
+            if min_vals[j] < channel_mins[j]:
+                channel_mins[j] = min_vals[j]
 
 
-def normalize_transform(dataset: Dataset, mean: np.ndarray, std: np.ndarray) -> None:
-    """
-    Нормализует значение каждого канала на среднее 0 и дисперсию 1
+        # для подсчета среднего и дисперсии
+        if skip:
+            mask = batch != skip_value
+            # mask = np.abs(batch - skip_value) > 0.3
 
-    """
-    dataset.pics_interp -= mean[None, :, None, None]
-    dataset.pics_interp /= std[None, :, None, None]
+            channel_sum += (batch * mask).sum(axis=(0, 2, 3))
+            channel_squared_sum += ((batch ** 2) * mask).sum(axis=(0, 2, 3))
+            valid_counts += mask.sum(axis=(0, 2, 3))
+
+        else:
+            channel_sum += batch.sum(axis=(0, 2, 3))
+            channel_squared_sum += (batch ** 2).sum(axis=(0, 2, 3))
+            valid_counts += batch.shape[0] * h * w  # весь батч
+
+
+    mean = channel_sum / valid_counts
+    std = np.sqrt(channel_squared_sum / valid_counts - mean ** 2)
+
+    return mean, std, channel_mins
 
