@@ -13,22 +13,19 @@ import matplotlib.pyplot as plt
 def train(model, train_loader, criterion, optimizer, reg = False):
     model.train()
     running_loss = 0.0
-    for image, data, labels in train_loader:
-        image = image.to(device)
-        data = data.to(device)
-
+    for image, labels in train_loader:
         optimizer.zero_grad()
-        preds = model(image, data)
 
-        # преобразуем класс 0 в вектор (1.0, 0.0), а класс 1 в вектор (0.0, 1.0)
-        labels = torch.eye(2)[labels]
-        labels = labels.float()
-        labels = labels.to(device)
+        image = image.to(device)
+        preds = model(image)
 
-        loss = criterion(preds, labels) * len(labels)
+        labels = labels.to(device).long()
+
+        loss = criterion(preds, labels)
         loss.backward()
         optimizer.step()
-        running_loss += loss.item()
+
+        running_loss += loss.item() * labels.size(0)
 
     return running_loss / len(train_loader.dataset)
 
@@ -36,23 +33,20 @@ def evaluate(model, val_loader, criterion):
     model.eval()
     running_loss =0.0
     with torch.no_grad():
-        for image, data, labels in val_loader:
+        for image, labels in val_loader:
             image = image.to(device)
-            data = data.to(device)
-            preds = model(image, data)
+            preds = model(image)
 
-            # преобразуем класс 0 в вектор (1.0, 0.0), а класс 1 в вектор (0.0, 1.0)
-            labels = torch.eye(2)[labels]
-            labels = labels.float()
-            labels = labels.to(device)
+            labels = labels.to(device).long()
 
-            loss = criterion(preds, labels) * len(labels)
-            running_loss += loss.item()
+            loss = criterion(preds, labels)
+
+            running_loss += loss.item() * labels.size(0)
 
     return running_loss / len(val_loader.dataset)
 
 
-def train_evaluate(model, criterion, optimizer, epochs, train_loader, test_loader, graph: bool = True):
+def train_evaluate(model, criterion, optimizer, epochs, train_loader, test_loader, graph: bool = True, graph_every: int = 1):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
 
@@ -60,16 +54,21 @@ def train_evaluate(model, criterion, optimizer, epochs, train_loader, test_loade
     val_losses = []
 
     for i in range(epochs):
-        train_losses.append(train(model, train_loader, criterion, optimizer))
-        val_losses.append(evaluate(model, test_loader, criterion))
+        # train_losses.append(train(model, train_loader, criterion, optimizer))
+        train(model, train_loader, criterion, optimizer)
 
-        if graph and (i+1)%1 == 0:
-            clear_output(True)
-            plt.plot(train_losses, label='train losses')
-            plt.plot(val_losses, label='val losses')
-            plt.legend()
-            plt.show()
+        if graph:
+            train_losses.append(evaluate(model, train_loader, criterion))
+            val_losses.append(evaluate(model, test_loader, criterion))
 
+            if (i+1) % graph_every == 0:
+                clear_output(True)
+                plt.plot(train_losses, label='train losses')
+                plt.plot(val_losses, label='val losses')
+                plt.legend()
+                plt.show()
+
+    print('Лосс на тренировочной выборке:', evaluate(model, train_loader, criterion))
     print('Лосс на тестовой выборке:', evaluate(model, test_loader, criterion))
 
 
