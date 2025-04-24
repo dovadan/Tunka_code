@@ -1,12 +1,19 @@
 import h5py
 import numpy as np
+import pandas
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
-import matplotlib.pyplot as plt
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from IPython.display import clear_output
+from sklearn.metrics import roc_curve, auc
+from typing import List, Tuple
 
-def create_particles_h5(file_names: list[str], hdf5_filename: str, warns: bool) -> list[list[int]]:
+
+def create_particles_h5(file_names: List[str], hdf5_filename: str, warns: bool) -> List[List[int]]:
     """
     Переводит батчами данные МК-моделирования из txt в h5df.
     Возвращает номера пропущенных строк в каждом файле, нужно для проверки корректности работы функции
@@ -121,6 +128,7 @@ def create_particles_h5(file_names: list[str], hdf5_filename: str, warns: bool) 
 
     return mis_lines_all
 
+
 def get_points(coords_filename: str) -> np.ndarray:
     """
     Считывает координаты левой нижней и правой верхней точек прямоугольных детекторов из файла coords_filename.txt
@@ -152,11 +160,11 @@ def get_points(coords_filename: str) -> np.ndarray:
 
     return points
 
-def vals_to_pic(points: np.ndarray, table_vals: np.ndarray, vals: np.ndarray, 
+def vals_to_pic(points: np.ndarray, table_vals: np.ndarray, vals: np.ndarray,
                        grid_size: int, fill_value: float, interp: bool = True) -> np.ndarray:
     """
     Преобразует значения с каждого детектора в картинку, пригодную для обработки сверточной сетью
-    с использование кубической интерполяции на сетке с помощью griddata из scipy.
+    с использование кубической интерполяции на сетке с помощью griddata из scipy или без неё.
 
     Args:
         points (np.ndarray) - координаты детекторов. Размер 19 x 3 (номер детектора, x, y)
@@ -218,7 +226,7 @@ def vals_to_pic(points: np.ndarray, table_vals: np.ndarray, vals: np.ndarray,
 
         tensor = np.stack(grid_layers, axis=0)
         return tensor
-    
+
     else:
         coords = points[:, 1 : 3]
         num_to_ind = {
@@ -254,8 +262,8 @@ def vals_to_pic(points: np.ndarray, table_vals: np.ndarray, vals: np.ndarray,
 
         n = np.array([np.sin(theta)*np.cos(phi), np.sin(theta)*np.sin(phi), np.cos(theta)])
         for j in range(19):
-            x_i = coords[j, 0]
-            y_i = coords[j, 1]
+            x_i = coords[j, 1]
+            y_i = coords[j, 0]
 
             a_j = np.array([x_i - last_x, y_i - last_y, 0])
             l_j = np.linalg.norm(a_j - np.dot(a_j, n) * n)
@@ -340,8 +348,6 @@ def visualise_grid(grid_values: np.ndarray) -> None:
     plt.grid(True)
     plt.show()
 
-
-
 def get_train_test(file_name: str, new_file: str, grid_size: int = 10, fill_value: float = -1.0, batch_size: int = 1000) -> None:
     """
     Создает new_file.h5 с train и test датасетами, состоящими из перемешанных протонных и фотонных событий.
@@ -425,8 +431,9 @@ def get_train_test(file_name: str, new_file: str, grid_size: int = 10, fill_valu
 
             # преобразуем батч из data_blocks в пригодные для сверточной сети тензоры,
             # полученные двумя разными способами: с интерполяцией и без
-            pics_interp = batch_vals_to_pic_interp(points, grid_size, headers, data_blocks, fill_value)
-            pics = batch_vals_to_pic(data_blocks, fill_value)
+            pics_interp = batch_vals_to_pic(points, grid_size, headers,
+                             data_blocks, fill_value, interp = True)
+            pics = batch_vals_to_pic(points, grid_size, headers, data_blocks, fill_value, interp = False)
 
             print(pics_interp.shape)
             print(pics.shape)
@@ -461,7 +468,7 @@ def get_train_test(file_name: str, new_file: str, grid_size: int = 10, fill_valu
 
 
 
-def get_mean_variance(hdf5_filename: str, structure_name: str, features_indeces: list[int]) -> list[tuple[int]]:
+def get_mean_variance(hdf5_filename: str, structure_name: str, features_indeces: List[int]) -> List[Tuple[int]]:
     """
     Батчами вычисляем среднее и дисперсию для выбранных признаков
 
@@ -494,7 +501,7 @@ def get_mean_variance(hdf5_filename: str, structure_name: str, features_indeces:
 
             for i in range(0, train_len, batch_size):
                 batch = hdf5_file['train']['headers'][i:i+batch_size, feature_index]
-                
+
                 sum_x += np.sum(batch)
                 sum_x2 += np.sum(batch ** 2)
                 count += len(batch)
@@ -519,13 +526,12 @@ def get_target(particle_type):
     else:
         return -1
 
-
-def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: list[int],
+def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: List[int],
                        normalize: bool,
-                       interp: bool, 
+                       interp: bool,
                        skip: bool,
-                       mean: list[float], std: list[float], channel_mins: list[float], # игнорируется, если normalize == False
-                       bias: list[float]): # игнорируется, если skip == False
+                       mean: List[float], std: List[float], channel_mins: List[float], # игнорируется, если normalize == False
+                       bias: List[float]): # игнорируется, если skip == False
     """
     Возвращает датасет, пригодный для подачи в нейросеть
 
@@ -585,7 +591,7 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
                     std = np.broadcast_to(self.std[:, None, None], (c, h, w))
 
                     # создаём маску, где значения меньше порога
-                    mask = pic < channel_mins 
+                    mask = pic < channel_mins
 
                     result = np.empty_like(pic)
 
@@ -628,7 +634,7 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
     return CustomDataset(file_path, structure_name, group_name, features_indeces,
                      normalize, skip, interp, mean, std, channel_mins, bias)
 
-def normalize_fit(dataset: Dataset, skip: bool = False, skip_value: float = -1.0) -> tuple[np.ndarray]:
+def normalize_fit(dataset: Dataset, skip: bool = False, skip_value: float = -1.0) -> Tuple[np.ndarray]:
     """
     Считаем среднее и дисперсию картинок по выборке dataset для каждого канала.
     Усреднение ведется по размеру батча, ширине и высоте картинки.
@@ -685,4 +691,3 @@ def normalize_fit(dataset: Dataset, skip: bool = False, skip_value: float = -1.0
     std = np.sqrt(channel_squared_sum / valid_counts - mean ** 2)
 
     return mean, std, channel_mins
-
