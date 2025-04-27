@@ -531,7 +531,15 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
                        interp: bool,
                        skip: bool,
                        mean: List[float], std: List[float], channel_mins: List[float], # игнорируется, если normalize == False
-                       bias: List[float]): # игнорируется, если skip == False
+                       bias: List[float], # игнорируется, если skip == False
+
+                       skip_ind: List[int] = [],
+                       skip_feat: bool = False,
+                       mean_feat: List[float] = [], std_feat: List[float] = [],
+                       bias_feat: List[float] = []
+                      ):
+
+                       
     """
     Возвращает датасет, пригодный для подачи в нейросеть
 
@@ -539,11 +547,16 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
     skip - пропускаем или нет отсутствующие значения при нормировке. Если да, то в i-м канале они сдвинутся на bias[i]
     interp - картинки с интерполяцией или нет
     bias - сдвиги для несработавших детекторов (нужны, только если skip == True)
+    
+    Для табличных признаков аналогично
+    skip_ind - индексы признаков с пропущенными  значениями из features_indeces(в данном случае такой индекс только один)
 
     """
     class CustomDataset(Dataset):
         def __init__(self, file_path, structure_name, group_name, features_indeces,
-                     normalize, skip, interp, mean, std, channel_mins, bias):
+                     normalize, skip, interp, mean, std, channel_mins, bias,
+                     skip_ind,
+                     skip_feat, mean_feat, std_feat, bias_feat):
             self.file_path = file_path
             self.group_name = group_name
             self.features_indeces = features_indeces
@@ -555,6 +568,11 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
             self.std = np.array(std)
             self.channel_mins = np.array(channel_mins)
             self.bias = np.array(bias)
+
+            self.skip_ind = skip_ind
+            self.mean_feat = np.array(mean_feat)
+            self.std_feat = np.array(std_feat)
+            self.bias_feat = np.array(bias_feat)
 
             self._file = None
             self.headers = None
@@ -604,10 +622,20 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
                     for c in range(pic.shape[0]):
                         pic[c] = (pic[c] - self.mean[c]) / self.std[c]
 
-
             pic_tensor = torch.tensor(pic, dtype=torch.float32)
 
-            features = [header[ind] for ind in self.features_indeces]
+
+            if normalize:
+                features = []
+                for i, ind in enumerate(self.features_indeces):
+                    if ind in self.skip_ind and header[ind] == -10: # поправить !!!
+                        features.append(header[ind] + self.bias_feat[skip_ind.index(ind)])
+                    else:
+                        features.append( (header[ind] - self.mean_feat[i]) / self.std_feat[i] )
+                        
+            else:
+                features = [header[ind] for ind in self.features_indeces]
+                
             features_tensor = torch.tensor(features, dtype=torch.float32)
 
             particle_type = header[5]
@@ -631,8 +659,25 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
         def __setstate__(self, state):
             self.__dict__.update(state)
 
-    return CustomDataset(file_path, structure_name, group_name, features_indeces,
-                     normalize, skip, interp, mean, std, channel_mins, bias)
+    return CustomDataset(
+        file_path=file_path,
+        structure_name=structure_name,
+        group_name=group_name,
+        features_indeces=features_indeces,
+        normalize=normalize,
+        skip=skip,
+        interp=interp,
+        mean=mean,
+        std=std,
+        channel_mins=channel_mins,
+        bias=bias,
+        skip_ind=skip_ind,
+        skip_feat=skip_feat,
+        mean_feat=mean_feat,
+        std_feat=std_feat,
+        bias_feat=bias_feat
+    )
+
 
 def normalize_fit(dataset: Dataset, skip: bool = False, skip_value: float = -1.0) -> Tuple[np.ndarray]:
     """
@@ -691,3 +736,51 @@ def normalize_fit(dataset: Dataset, skip: bool = False, skip_value: float = -1.0
     std = np.sqrt(channel_squared_sum / valid_counts - mean ** 2)
 
     return mean, std, channel_mins
+
+
+def normalize_fit_features(dataset: Dataset, skip_ind: List[int], features_indeces: List[str], skip: bool = False, skip_value: float = -10.0) -> Tuple[np.ndarray]:
+    """
+    Считаем среднее и дисперсию табличный признаков по выборке dataset.
+    Усреднение ведется по размеру батча.
+
+    Для табличных признаков пропущенные значения есть только для last_N_mu
+
+    Возвращает среднее, стандартное отклонение для каждого табличного признака.
+    Если skip == True, то в last_N_mu пропускаем значения со skip_value
+    skip_ind - индексы признаков с пропущенными значениями из features_indeces(в данном случае такой индекс только один)
+
+    """
+    skip_ind = [features_indeces.index(feat_idx) for feat_idx in skip_ind]
+    
+    dataset_len = dataset.headers.shape[0]
+    c = len(features_indeces)
+
+    feature_sum = np.zeros(c, dtype = np.float64) # для подсчета среднего и дисперсии
+    feature_squared_sum = np.zeros(c, dtype = np.float64)
+
+    valid_counts = np.zeros(c, dtype=np.int64) # для подсчета не маскированных значений в каждом канале
+
+    batch_size = 1000
+
+    for i in range(0, dataset_len, batch_size):
+        batch = dataset.headers[i:i + batch_size][:, features_indeces]
+
+        for j in range(c):
+            column = batch[:, j]
+            
+            if skip and j in skip_ind:
+                valid_mask = column != skip_value
+                feature_sum[j] += column[valid_mask].sum()
+                feature_squared_sum[j] += (column[valid_mask] ** 2).sum()
+                valid_counts[j] += valid_mask.sum()
+                
+            else:
+                feature_sum[j] += column.sum()
+                feature_squared_sum[j] += (column ** 2).sum()
+                valid_counts[j] += column.shape[0]
+
+
+    mean = feature_sum / valid_counts
+    std = np.sqrt(feature_squared_sum / valid_counts - mean ** 2)
+
+    return mean, std
