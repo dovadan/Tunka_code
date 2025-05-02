@@ -124,6 +124,34 @@ def train_evaluate(model, criterion, optimizer, epochs, train_loader, test_loade
     print('Лосс на тестовой выборке:', evaluate(model, test_loader, criterion))
 
 
+def train_evaluate_par(model, criterion, optimizer, epochs, train_loader, test_loader, scheduler = None):
+    """
+    Функция для обучения парралельно нескольких моделей
+    Ничего не отрисовывает, только возвращает лоссы на трейне и тесте в конце каждой эпохи обучения
+    
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    model.to(device)
+
+    train_losses = []
+    val_losses = []
+
+    for i in range(epochs):
+        train(model, train_loader, criterion, optimizer)
+
+        train_loss = evaluate(model, train_loader, criterion)
+        val_loss = evaluate(model, test_loader, criterion)
+
+        if scheduler is not None:
+            scheduler.step(val_loss)
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
+    return train_losses, val_losses
+
+
 def plot_roc(model, test_loader):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.eval()
@@ -323,6 +351,60 @@ class GammaProtonClassifier10(nn.Module):
         out = self.fc(x)
         return out
 
+# class GammaProtonClassifier11(nn.Module):
+#     def __init__(self):
+#         super(GammaProtonClassifier11, self).__init__()
+
+#         self.pad1 = nn.ConstantPad2d(1, -1.0)
+#         self.conv1 = nn.Conv2d(4, 16, kernel_size=3, padding=0)
+#         self.relu1 = nn.ReLU()
+#         self.dropout1 = nn.Dropout2d(p=0.2)
+
+#         self.conv2 = nn.Conv2d(16, 16, kernel_size=3, padding=1) # [batch_size, 8, 5, 5]
+#         self.relu2 = nn.ReLU()
+#         self.dropout2 = nn.Dropout2d(p=0.2)
+
+#         self.skip = nn.Identity()
+
+#         self.dropout3 = nn.Dropout2d(p=0.5)
+
+#         self.ln = nn.LayerNorm(16 * 5 * 5 + 9)
+
+#         self.fc = nn.Sequential(
+#             nn.Linear(16 * 5 * 5 + 9, 512),
+#             nn.LayerNorm(512),
+#             nn.Tanh(),
+#             nn.Dropout(p=0.3),
+
+#             nn.Linear(512, 256),
+#             nn.LayerNorm(256),
+#             nn.Tanh(),
+#             nn.Dropout(p=0.3),
+
+#             nn.Linear(256, 2)
+#         )
+
+#     def forward(self, image, features):
+#         x_img = self.pad1(image)
+#         x_img = self.conv1(x_img)  # [batch_size, 16, 5, 5]
+#         x_img = self.relu1(x_img)
+#         x_img = self.dropout1(x_img)
+
+#         identify = self.skip(x_img)
+
+#         x_img = self.conv2(x_img)
+#         x_img = self.relu2(x_img)
+#         x_img = self.dropout2(x_img)
+
+#         x_img = x_img + identify
+
+#         x_img = x_img.view(x_img.size(0), -1)  # [batch_size,16*5*5]
+#         x_img = self.dropout3(x_img)
+#         x = torch.cat([x_img, features], dim=1)
+#         x = self.ln(x)
+#         out = self.fc(x)
+#         return out
+
 class GammaProtonClassifier11(nn.Module):
     def __init__(self):
         super(GammaProtonClassifier11, self).__init__()
@@ -338,20 +420,27 @@ class GammaProtonClassifier11(nn.Module):
 
         self.skip = nn.Identity()
 
-        self.ln = nn.LayerNorm(16 * 5 * 5 + 9)
+        self.pool = nn.AdaptiveMaxPool2d((1, 1))
+        self.dropout3 = nn.Dropout(p=0.5) 
+
+        # self.bn = nn.BatchNorm1d(16 + 9)
+        self.ln = nn.LayerNorm(16 + 9)
+
+        # self.ln_pic = nn.LayerNorm(16)
+        # self.ln_feat = nn.LayerNorm(9)
 
         self.fc = nn.Sequential(
-            nn.Linear(16 * 5 * 5 + 9, 512),
-            nn.LayerNorm(512),
-            nn.Tanh(),
-            nn.Dropout(p=0.2),
-
-            nn.Linear(512, 256),
+            nn.Linear(16 + 9, 256),
             nn.LayerNorm(256),
             nn.Tanh(),
-            nn.Dropout(p=0.2),
+            nn.Dropout(p=0.5),
 
-            nn.Linear(256, 2)
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.Tanh(),
+            nn.Dropout(p=0.5),
+
+            nn.Linear(128, 2)
         )
 
     def forward(self, image, features):
@@ -368,8 +457,18 @@ class GammaProtonClassifier11(nn.Module):
 
         x_img = x_img + identify
 
-        x_img = x_img.view(x_img.size(0), -1)  # [batch_size,16*5*5]
+        x_img = self.pool(x_img) # [batch_size,16,1,1]
+        x_img = x_img.view(x_img.size(0), -1)  # [batch_size,16]
+
+        # x_img = self.ln_pic(x_img)
+        # features = self.ln_feat(features)
+        
+        x_img = self.dropout3(x_img)
+        
         x = torch.cat([x_img, features], dim=1)
+        # x = self.bn(x)
         x = self.ln(x)
         out = self.fc(x)
         return out
+
+
