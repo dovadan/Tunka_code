@@ -526,7 +526,21 @@ def get_target(particle_type):
     else:
         return -1
 
-def get_custom_dataset(file_path: str, structure_name: str, group_name: str, features_indeces: List[int],
+       
+class CustomDataset(Dataset):
+    """
+    Датасет, пригодный для подачи в нейросеть
+    
+    normalize - нормировать или нет
+    skip - пропускаем или нет отсутствующие значения при нормировке. Если да, то в i-м канале они сдвинутся на bias[i]
+    interp - картинки с интерполяцией или нет
+    bias - сдвиги для несработавших детекторов (нужны, только если skip == True)
+    
+    Для табличных признаков аналогично
+    skip_ind - индексы признаков с пропущенными  значениями из features_indeces(в данном случае такой индекс только один)
+    
+    """
+    def __init__(self, file_path: str, structure_name: str, group_name: str, features_indeces: List[int],
                        normalize: bool,
                        interp: bool,
                        skip: bool,
@@ -538,145 +552,108 @@ def get_custom_dataset(file_path: str, structure_name: str, group_name: str, fea
                        mean_feat: List[float] = [], std_feat: List[float] = [],
                        bias_feat: List[float] = []
                       ):
+        self.file_path = file_path
+        self.group_name = group_name
+        self.features_indeces = features_indeces
 
-                       
-    """
-    Возвращает датасет, пригодный для подачи в нейросеть
+        self.normalize = normalize
+        self.skip = skip
+        self.interp = interp
+        self.mean = np.array(mean)
+        self.std = np.array(std)
+        self.channel_mins = np.array(channel_mins)
+        self.bias = np.array(bias)
 
-    normalize - нормировать или нет
-    skip - пропускаем или нет отсутствующие значения при нормировке. Если да, то в i-м канале они сдвинутся на bias[i]
-    interp - картинки с интерполяцией или нет
-    bias - сдвиги для несработавших детекторов (нужны, только если skip == True)
-    
-    Для табличных признаков аналогично
-    skip_ind - индексы признаков с пропущенными  значениями из features_indeces(в данном случае такой индекс только один)
+        self.skip_ind = skip_ind
+        self.mean_feat = np.array(mean_feat)
+        self.std_feat = np.array(std_feat)
+        self.bias_feat = np.array(bias_feat)
 
-    """
-    class CustomDataset(Dataset):
-        def __init__(self, file_path, structure_name, group_name, features_indeces,
-                     normalize, skip, interp, mean, std, channel_mins, bias,
-                     skip_ind,
-                     skip_feat, mean_feat, std_feat, bias_feat):
-            self.file_path = file_path
-            self.group_name = group_name
-            self.features_indeces = features_indeces
+        self._file = None
+        self.headers = None
+        self.pics_interp = None
 
-            self.normalize = normalize
-            self.skip = skip
-            self.interp = interp
-            self.mean = np.array(mean)
-            self.std = np.array(std)
-            self.channel_mins = np.array(channel_mins)
-            self.bias = np.array(bias)
+        with h5py.File(self.file_path, 'r') as f:
+            self.length = f[self.group_name]['headers'].shape[0]
 
-            self.skip_ind = skip_ind
-            self.mean_feat = np.array(mean_feat)
-            self.std_feat = np.array(std_feat)
-            self.bias_feat = np.array(bias_feat)
-
-            self._file = None
-            self.headers = None
-            self.pics_interp = None
-
-            with h5py.File(self.file_path, 'r') as f:
-                self.length = f[self.group_name]['headers'].shape[0]
-
-        def _init_file(self):
-            if self._file is None: # если файл не открыт
-                self._file = h5py.File(self.file_path, 'r', swmr=True)
-                self.headers = self._file[self.group_name]['headers']
-                if interp:
-                    self.pics_interp = self._file[self.group_name]['pics_interp']
-                else:
-                    self.pics_interp = self._file[self.group_name]['pics']
-
-        def __len__(self):
-            return self.length
-
-        def __getitem__(self, idx):
-            self._init_file()
-
-            header = self.headers[idx]
-
-            pic = self.pics_interp[idx]
-            if self.normalize:
-                if self.skip:
-                    c, h, w = pic.shape
-
-                    channel_mins = np.broadcast_to(self.channel_mins[:, None, None], (c, h, w))
-                    bias = np.broadcast_to(self.bias[:, None, None], (c, h, w))
-                    mean = np.broadcast_to(self.mean[:, None, None], (c, h, w))
-                    std = np.broadcast_to(self.std[:, None, None], (c, h, w))
-
-                    # создаём маску, где значения меньше порога
-                    mask = pic < channel_mins
-
-                    result = np.empty_like(pic)
-
-                    result[mask] = pic[mask] + bias[mask]
-                    result[~mask] = (pic[~mask] - mean[~mask]) / std[~mask]
-
-                    pic = result
-
-                else:
-                    for c in range(pic.shape[0]):
-                        pic[c] = (pic[c] - self.mean[c]) / self.std[c]
-
-            pic_tensor = torch.tensor(pic, dtype=torch.float32)
-
-
-            if normalize:
-                features = []
-                for i, ind in enumerate(self.features_indeces):
-                    if ind in self.skip_ind and header[ind] == -10: # поправить !!!
-                        features.append(header[ind] + self.bias_feat[skip_ind.index(ind)])
-                    else:
-                        features.append( (header[ind] - self.mean_feat[i]) / self.std_feat[i] )
-                        
+    def _init_file(self):
+        if self._file is None: # если файл не открыт
+            self._file = h5py.File(self.file_path, 'r', swmr=True)
+            self.headers = self._file[self.group_name]['headers']
+            if self.interp:
+                self.pics_interp = self._file[self.group_name]['pics_interp']
             else:
-                features = [header[ind] for ind in self.features_indeces]
-                
-            features_tensor = torch.tensor(features, dtype=torch.float32)
+                self.pics_interp = self._file[self.group_name]['pics']
 
-            particle_type = header[5]
-            target = get_target(particle_type)
+    def __len__(self):
+        return self.length
 
-            return pic_tensor, features_tensor, target
+    def __getitem__(self, idx):
+        self._init_file()
 
-        def __del__(self):
-            if self._file is not None:
-                self._file.close()
+        header = self.headers[idx]
 
-        def __getstate__(self):
-            # Исключаем открытый файл из сериализации
-            state = self.__dict__.copy()
-            state['_file'] = None
-            state['headers'] = None
-            state['pics_interp'] = None
-            state['pics'] = None
-            return state
+        pic = self.pics_interp[idx]
+        if self.normalize:
+            if self.skip:
+                c, h, w = pic.shape
 
-        def __setstate__(self, state):
-            self.__dict__.update(state)
+                channel_mins = np.broadcast_to(self.channel_mins[:, None, None], (c, h, w))
+                bias = np.broadcast_to(self.bias[:, None, None], (c, h, w))
+                mean = np.broadcast_to(self.mean[:, None, None], (c, h, w))
+                std = np.broadcast_to(self.std[:, None, None], (c, h, w))
 
-    return CustomDataset(
-        file_path=file_path,
-        structure_name=structure_name,
-        group_name=group_name,
-        features_indeces=features_indeces,
-        normalize=normalize,
-        skip=skip,
-        interp=interp,
-        mean=mean,
-        std=std,
-        channel_mins=channel_mins,
-        bias=bias,
-        skip_ind=skip_ind,
-        skip_feat=skip_feat,
-        mean_feat=mean_feat,
-        std_feat=std_feat,
-        bias_feat=bias_feat
-    )
+                # создаём маску, где значения меньше порога
+                mask = pic < channel_mins
+
+                result = np.empty_like(pic)
+
+                result[mask] = pic[mask] + bias[mask]
+                result[~mask] = (pic[~mask] - mean[~mask]) / std[~mask]
+
+                pic = result
+
+            else:
+                for c in range(pic.shape[0]):
+                    pic[c] = (pic[c] - self.mean[c]) / self.std[c]
+
+        pic_tensor = torch.tensor(pic, dtype=torch.float32)
+
+
+        if self.normalize:
+            features = []
+            for i, ind in enumerate(self.features_indeces):
+                if self.skip_ind and (ind in self.skip_ind) and (header[ind] == -10): # поправить !!!
+                    features.append(header[ind] + self.bias_feat[self.skip_ind.index(ind)])
+                else:
+                    features.append( (header[ind] - self.mean_feat[i]) / self.std_feat[i] )
+                    
+        else:
+            features = [header[ind] for ind in self.features_indeces]
+            
+        features_tensor = torch.tensor(features, dtype=torch.float32)
+
+        particle_type = header[5]
+        target = get_target(particle_type)
+
+        return pic_tensor, features_tensor, target
+
+    def __del__(self):
+        if self._file is not None:
+            self._file.close()
+
+    def __getstate__(self):
+        # Исключаем открытый файл из сериализации
+        state = self.__dict__.copy()
+        state['_file'] = None
+        state['headers'] = None
+        state['pics_interp'] = None
+        state['pics'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
 
 
 def normalize_fit(dataset: Dataset, skip: bool = False, skip_value: float = -1.0) -> Tuple[np.ndarray]:
