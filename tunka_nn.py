@@ -11,6 +11,8 @@ from torch.utils.data import Dataset, DataLoader
 from IPython.display import clear_output
 from sklearn.metrics import roc_curve, auc
 from typing import List, Tuple
+import bisect
+from scipy.stats import poisson
 
 
 class FocalLoss(nn.Module):
@@ -214,6 +216,67 @@ def get_weights(model, features_indeces, columns):
         ind = tab_feat_ind[i][1] # индекс в списке feature_indeces
         feat_ind = features_indeces[ind] # индекс в списке columns
         print(tab_feat_ind[i][0], columns[feat_ind])
+
+
+def evaluate_n(model, test_loader):
+    """
+    Возвращает ksi_opt =  argmin_{ksi} sigma_95(n(ksi)) / s(ksi) и F_min = min_{ksi} sigma_95(n(ksi)) / s(ksi)
+    
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.eval()
+    
+    preds_class_0 = []
+    preds_class_1 = []
+    
+    with torch.no_grad():
+        for images, features, labels in test_loader:
+            images = images.to(device)
+            features = features.to(device)
+            labels = labels.to(device)
+    
+            logits = model(images, features)                      
+            probs = F.softmax(logits, dim=1).cpu().numpy() 
+    
+            labels_np = labels.cpu().numpy()      
+    
+            preds_class_0.extend(probs[labels_np == 0, 0])
+            preds_class_1.extend(probs[labels_np == 1, 0])
+
+    # временная функция, потом нужно будет заменить на другую, чтобы интервалы совпадали с теми, что из статьи
+    def poisson_conf_interval(n, alpha=0.05):
+        lower = 0.0 if n == 0 else poisson.ppf(alpha / 2, n)
+        upper = poisson.ppf(1 - alpha / 2, n + 1)
+        return lower, upper
+    
+    # сортируем по возрастанию, чтобы можно было применять бин. поиск
+    preds_class_gamma = sorted(preds_class_0)
+    preds_class_proton = sorted(preds_class_1)
+    
+    thresholds = np.arange(0.8, preds_class_gamma[-1], 0.0001)
+    print('len(thresholds): ', len(thresholds))
+
+    # ищем ksi_opt, сложность по времени o(len(thresholds)* log(len(test))), по памяти o(len(test))
+    ksi_opt = -1
+    F_min = 10**9
+    for ksi in thresholds:
+        # ищем бин. поиском индекс элемента, начиная с которого все значения >= ksi
+        ind_left_gamma = bisect.bisect_left(preds_class_gamma, ksi)
+        n_gamma_0 = len(preds_class_gamma)
+        n_gamma_ksi = len(preds_class_gamma) - ind_left_gamma
+        s = n_gamma_ksi / n_gamma_0
+        
+        ind_left_proton = bisect.bisect_left(preds_class_proton, ksi)
+        n_gamma_cand_mk = len(preds_class_proton) - ind_left_proton
+        
+        sigma_95 = poisson_conf_interval(n_gamma_cand_mk)[1]
+        f = sigma_95 / s
+        
+        if f < F_min:
+            F_min = f
+            ksi_opt = ksi
+
+    return ksi_opt, F_min
 
 class GammaProtonClassifier8(nn.Module):
     def __init__(self):
@@ -442,6 +505,11 @@ class GammaProtonClassifier11(nn.Module):
 
             nn.Linear(128, 2)
         )
+
+        # with torch.no_grad():
+        #     self.fc[-1].bias.copy_(torch.tensor([-1.0, -1.0]))
+
+    
 
     def forward(self, image, features):
         x_img = self.pad1(image)
