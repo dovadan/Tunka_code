@@ -467,6 +467,134 @@ def get_train_test(file_name: str, new_file: str, grid_size: int = 10, fill_valu
             test_pics_dset[-test_pics.shape[0]:] = test_pics
 
 
+# Изначально код писался для работы с большими данными, где k-fold бы не потребовался,
+# но для экономии времени и чтобы ничего не поломать в предыдущем коде, я решил написать функцию, которая просто создает
+# h5 файл с некоторым выбранным фолдом в качестве тестового
+def get_train_test_kfold(file_name: str, new_file: str, fold: int, grid_size: int = 10, fill_value: float = -1.0, batch_size: int = 1000) -> None:
+    """
+    Создает new_file.h5 с train и test датасетами, где тестовым является некоторый выбранный фолд.
+    Перед перемешиванием фиксируем random_seed, так что при разных значениях fold трейн и тест не смешиваются.
+
+    Args:
+        file_name (str) - имя входного файла
+        new_file (str) - имя выходного файла
+        grid_size (int) - размер сетки
+        fill_value (float) - чем заполнять значения несработавших детекторов
+        batch_size (int) - размер батча для считывания из h5-файла
+
+    Returns:
+
+    """
+    assert fold <= 10
+
+    np.random.seed(42)
+
+    points = get_points(coords_filename='Koordinaty_oldGeantGrande.txt')
+
+    with h5py.File(file_name, 'r') as hdf5_file, h5py.File(new_file, 'w') as new_hdf5:
+        gamma_size = hdf5_file['gamma/headers'].shape[0]
+        proton_size = hdf5_file['proton/headers'].shape[0]
+
+        min_size = min(gamma_size, proton_size)
+
+        train_group = new_hdf5.create_group('train')
+        test_group = new_hdf5.create_group('test')
+
+
+        train_headers_dset = train_group.create_dataset('headers', shape=(0, 19), maxshape=(None, 19), dtype='float32', chunks=(batch_size, 19))
+
+        train_pics_interp_dset = train_group.create_dataset('pics_interp', shape=(0, 4, grid_size, grid_size),
+                                                           maxshape=(None, 4, grid_size, grid_size), dtype='float32',
+                                                           chunks=(batch_size, 4, grid_size, grid_size))
+
+        train_pics_dset = train_group.create_dataset('pics', shape=(0, 4, 5, 5),
+                                                           maxshape=(None, 4, 5, 5), dtype='float32',
+                                                           chunks=(batch_size, 4, 5, 5))
+
+
+        test_headers_dset = test_group.create_dataset('headers', shape=(0, 19), maxshape=(None, 19), dtype='float32', chunks=(batch_size, 19))
+
+        test_pics_interp_dset = test_group.create_dataset('pics_interp', shape=(0, 4, grid_size, grid_size),
+                                                           maxshape=(None, 4, grid_size, grid_size), dtype='float32',
+                                                           chunks=(batch_size, 4, grid_size, grid_size))
+
+        test_pics_dset = test_group.create_dataset('pics', shape=(0, 4, 5, 5),
+                                                           maxshape=(None, 4, 5, 5), dtype='float32',
+                                                           chunks=(batch_size, 4, 5, 5))
+
+        # создаем массивы из перемешанных индексов для считывания батчей
+        gamma_indeces = np.arange(min_size)
+        np.random.shuffle(gamma_indeces)
+
+        proton_indeces = np.arange(min_size)
+        np.random.shuffle(proton_indeces)
+
+        # для проверки, что трейн и тест не перемешиваются при выбранном фолде fold в качестве тестового
+        print('gamma_indeces:  ',gamma_indeces[1000:1050])
+        print('proton_indeces: ',proton_indeces[1000:1050])
+
+
+        k = 10
+        min_size = min_size//k * k
+        fold_size = min_size//k
+
+        for i in range(10):
+            start = i * fold_size
+            end   = start + fold_size
+
+            # здесь используется sorted, т.к. hdf5_file['gamma/headers'] требует отсортированный массив
+            # далее батч будет перемешан
+            gamma_indeces_batch = sorted(gamma_indeces[start:end])
+            proton_indeces_batch = sorted(proton_indeces[start:end])
+
+            # загружаем батч данных
+            gamma_headers = hdf5_file['gamma/headers'][gamma_indeces_batch]
+            gamma_data_blocks = hdf5_file['gamma/data_blocks'][gamma_indeces_batch]
+            proton_headers = hdf5_file['proton/headers'][proton_indeces_batch]
+            proton_data_blocks = hdf5_file['proton/data_blocks'][proton_indeces_batch]
+
+            # объединяем gamma и proton
+            headers = np.vstack([gamma_headers, proton_headers])
+            data_blocks = np.vstack([gamma_data_blocks, proton_data_blocks])
+
+            # перемешиваем батч
+            indices = np.random.permutation(len(headers))
+            headers = headers[indices]
+            data_blocks = data_blocks[indices]
+
+            # преобразуем батч из data_blocks в пригодные для сверточной сети тензоры,
+            # полученные двумя разными способами: с интерполяцией и без
+            pics_interp = batch_vals_to_pic(points, grid_size, headers,
+                             data_blocks, fill_value, interp = True)
+            pics = batch_vals_to_pic(points, grid_size, headers, data_blocks, fill_value, interp = False)
+
+            # print(pics_interp.shape)
+            # print(pics.shape)
+
+            if (i+1) != fold:
+                # записываем в hdf5 с изменением размера
+                train_headers_dset.resize(train_headers_dset.shape[0] + headers.shape[0], axis=0)
+                train_headers_dset[-headers.shape[0]:] = headers
+    
+                train_pics_interp_dset.resize(train_pics_interp_dset.shape[0] + pics_interp.shape[0], axis=0)
+                train_pics_interp_dset[-pics_interp.shape[0]:] = pics_interp
+    
+                train_pics_dset.resize(train_pics_dset.shape[0] + pics.shape[0], axis=0)
+                train_pics_dset[-pics.shape[0]:] = pics
+
+            else:
+                test_headers_dset.resize(test_headers_dset.shape[0] + headers.shape[0], axis=0)
+                test_headers_dset[-headers.shape[0]:] = headers
+    
+                test_pics_interp_dset.resize(test_pics_interp_dset.shape[0] + pics_interp.shape[0], axis=0)
+                test_pics_interp_dset[-pics_interp.shape[0]:] = pics_interp
+    
+                test_pics_dset.resize(test_pics_dset.shape[0] + pics.shape[0], axis=0)
+                test_pics_dset[-pics.shape[0]:] = pics
+
+            i += 1
+
+
 
 def get_mean_variance(hdf5_filename: str, structure_name: str, features_indeces: List[int]) -> List[Tuple[int]]:
     """

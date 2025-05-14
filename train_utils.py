@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import ConcatDataset
 from IPython.display import clear_output
 from sklearn.metrics import roc_curve, auc
 from typing import List, Tuple
@@ -27,13 +28,19 @@ def train_model(model_class,
                 optim_class, optim_kwargs,
                 crit_class, crit_kwargs,
                 sched_class, sched_kwargs,
-                epochs, seed, gpu_id=0):
+                epochs, seed, gpu_id=0, fold=0):
 
     """
     Реализует пайплайн обучения отдельной модели, нужно для параллельного обучения нескольких моделей
     Сохраняет в текущий каталог график лосс функции на трейне и тесте и значени лосса на трейне и тесте после обучения
 
     """
+
+    # если не используем k-fold
+    if fold == 0:
+        file_path = 'train_test.h5'
+    else:
+        file_path = 'train_test_'+str(fold)+'.h5'
 
     with open('structure.txt', 'r') as file_struct:
         struct = file_struct.readlines()
@@ -43,7 +50,7 @@ def train_model(model_class,
 
     features_indeces = [3, 4, 6, 13, 14, 15, 16, 17, 18]
 
-    train_dataset_fit = tunka_data_prep.CustomDataset(file_path='train_test.h5', structure_name = 'structure.txt',
+    train_dataset_fit = tunka_data_prep.CustomDataset(file_path=file_path, structure_name = 'structure.txt',
                                         group_name='train', features_indeces=features_indeces,
                                         normalize = False,
                                         interp = False,
@@ -64,7 +71,7 @@ def train_model(model_class,
     bias_feat = [9.5]
 
     train_dataset = tunka_data_prep.CustomDataset(
-        file_path='train_test.h5',
+        file_path=file_path,
         structure_name='structure.txt',
         group_name='train',
         features_indeces=features_indeces,
@@ -83,7 +90,7 @@ def train_model(model_class,
     )
     
     test_dataset = tunka_data_prep.CustomDataset(
-        file_path='train_test.h5',
+        file_path=file_path,
         structure_name='structure.txt',
         group_name='test',
         features_indeces=features_indeces,
@@ -114,7 +121,10 @@ def train_model(model_class,
 
     optimizer = optim_class(model.parameters(), **optim_kwargs)
 
-    scheduler = sched_class(optimizer, **sched_kwargs)
+    if sched_class:
+        scheduler = sched_class(optimizer, **sched_kwargs)
+    else:
+        scheduler = None
 
 
     train_loss_list, test_loss_list = tunka_nn.train_evaluate_par(
@@ -148,7 +158,7 @@ def train_model(model_class,
     
     optim_name = optim_class.__name__
     crit_name  = crit_class.__name__
-    sched_name = sched_class.__name__
+    sched_name = sched_class.__name__ if sched_class else "None"
     def fmt(d): return '\n'.join(f'{k}={v}' for k,v in d.items())
     
     text = (
@@ -161,10 +171,16 @@ def train_model(model_class,
         f'Seed:   {seed}'
     )
     ax_info.text(0, 1, text, va='top', ha='left', fontfamily='monospace')
-        
+
+    os.makedirs("Pics", exist_ok=True)
+
     # plt.tight_layout()
     ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     uid = uuid.uuid4().hex[:8]
     filename = f"loss_{model_name}_{seed}_{ts}_{uid}.png"
-    plt.savefig(filename)
+    filepath = os.path.join("Pics", filename)
+    plt.savefig(filepath)
     plt.close()
+
+    return model
+
