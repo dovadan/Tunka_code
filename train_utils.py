@@ -182,5 +182,8 @@ def train_model(model_class,
     plt.savefig(filepath)
     plt.close()
 
-    return model
+    metric_loss = tunka_nn.evaluate(model, test_loader, criterion = criterion)
+    ksi_opt,  metric_n = tunka_nn.evaluate_n(model, test_loader)
+
+    return model, metric_loss, metric_n, ksi_opt
 
