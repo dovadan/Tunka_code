@@ -5,7 +5,7 @@ from typing import List, Tuple
 
 import h5py
 import numpy as np
-import pandas
+import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 from IPython.display import clear_output
@@ -134,7 +134,10 @@ def train_model(model_class,
         scheduler=scheduler
     )
 
-
+    
+    """
+    Отрисовка лоссов
+    """
     model_name = model_class.__name__
 
     fig, (ax_plot, ax_info) = plt.subplots(
@@ -185,6 +188,106 @@ def train_model(model_class,
     plt.savefig(filepath)
     plt.close(fig)
 
+
+    """
+    Отрисовка распределений предсказаний модели
+    """
+    model_name = model_class.__name__
+
+    fig, (ax_plot, ax_info) = plt.subplots(
+        nrows=1, ncols=2,
+        figsize=(10, 4),
+        gridspec_kw={'width_ratios': [3, 1], 'wspace': 0.4},
+        constrained_layout=True
+    )
+
+
+    preds_class_0 = []
+    preds_class_1 = []
+    with torch.no_grad():
+        for images, features, labels in test_loader:
+            images = images.to(device)
+            features = features.to(device)
+            labels = labels.to(device)
+    
+            logits = model(images, features)                      
+            probs = F.softmax(logits, dim=1).cpu().numpy()        
+    
+            labels_np = labels.cpu().numpy()      
+    
+            preds_class_0.extend(probs[labels_np == 0, 0])
+            preds_class_1.extend(probs[labels_np == 1, 0])
+    
+    
+    bins = np.linspace(0, 1, 30)
+    
+    ax_plot.hist(preds_class_0, bins=bins, alpha=0.6, label='Class 0', density=True, log=True, color='blue', edgecolor='black')
+    ax_plot.hist(preds_class_1, bins=bins, alpha=0.6, label='Class 1', density=True, log=True, color='orange', edgecolor='black')
+    
+    ax_plot.set_xlabel('Predicted probability of class 0 (0 - photon)')
+    ax_plot.set_ylabel('Log Count (normalized)')
+    ax_plot.legend()
+    ax_plot.grid(True, which='both', ls='--', lw=0.5)
+    
+ 
+    ax_info.axis('off')
+    final_train = train_loss_list[-1]
+    final_test  = test_loss_list[-1]
+    
+    optim_name = optim_class.__name__
+    crit_name  = crit_class.__name__
+    sched_name = sched_class.__name__ if sched_class else "None"
+    def fmt(d): return '\n'.join(f'{k}={v}' for k,v in d.items())
+    
+    text = (
+        f'Final train: {final_train:.4f}\n'
+        f'Final test:  {final_test:.4f}\n\n'
+        f'Opt:   {optim_name}\n{fmt(optim_kwargs)}\n\n'
+        f'Crit:  {crit_name}\n{fmt(crit_kwargs)}\n\n'
+        f'Sched: {sched_name}\n{fmt(sched_kwargs)}\n\n'
+        f'Epochs: {epochs}\n'
+        f'Seed:   {seed}'
+    )
+    ax_info.text(0, 1, text, va='top', ha='left', fontfamily='monospace')
+
+    base_dir = os.path.dirname(results_path)
+    preds_distr = os.path.join(base_dir, "preds_distr")
+    os.makedirs(preds_distr, exist_ok=True)
+
+    ts_fig = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    uid_fig = uuid.uuid4().hex[:8]
+    filename = f"preds_distr_{model_name}_{seed}_{ts_fig}_{uid_fig}.png"
+    filepath = os.path.join(preds_distr, filename)
+
+    plt.savefig(filepath)
+    plt.close(fig)
+
+    """
+    Сохранение предсказаний в csv файл (может не подойти для больших данных)
+    """
+    preds_class_0.sort()
+    preds_class_1.sort()
+    csv_path = os.path.join(base_dir, "preds.csv")
+
+    row = {
+        "Seed": seed,
+        "Fold": fold,
+        "Class0_Preds": ",".join(f"{x:.6f}" for x in preds_class_0),
+        "Class1_Preds": ",".join(f"{x:.6f}" for x in preds_class_1)
+    }
+
+
+    if not os.path.isfile(csv_path):
+        df_init = pd.DataFrame([row], columns=["Seed", "Fold", "Class0_Preds", "Class1_Preds"])
+        df_init.to_csv(csv_path, index=False)
+    else:
+        df_new = pd.DataFrame([row], columns=["Seed", "Fold", "Class0_Preds", "Class1_Preds"])
+        df_new.to_csv(csv_path, mode="a", header=False, index=False)
+    
+
+    """
+    Подсчет метрик для обученной модели
+    """
     metric_loss = tunka_nn.evaluate(model, test_loader, criterion = criterion)
     ksi_opt,  metric_n = tunka_nn.evaluate_n(model, test_loader)
 
@@ -285,6 +388,7 @@ def train_parallel(
             f.write(f"Средняя метрика n:  {mean_n:.4f} ± {std_n:.4f}\n")
             f.write(f"ksi_opts:           {ksi_opts}\n\n")
 
+
     model_name = model_class.__name__
 
     fig = plt.figure(figsize=(10, 8), constrained_layout=True)
@@ -365,6 +469,7 @@ def train_parallel(
 
     plt.savefig(filepath_fig)
     plt.close(fig)
+
 
     print(f"Done. Все файлы сохранены в папке: {base_dir}")
 
