@@ -253,10 +253,9 @@ def evaluate_n(model, test_loader):
     preds_class_gamma = sorted(preds_class_0)
     preds_class_proton = sorted(preds_class_1)
     
-    thresholds = np.arange(0.8, preds_class_gamma[-1], 0.0001)
-    print('len(thresholds): ', len(thresholds))
+    thresholds = sorted(preds_class_gamma + preds_class_proton)
 
-    # ищем ksi_opt, сложность по времени o(len(thresholds)* log(len(test))), по памяти o(len(test))
+    # ищем ksi_opt, сложность по времени o(len(test)* log(len(test))), по памяти o(len(test))
     ksi_opt = -1
     F_min = 10**9
     for ksi in thresholds:

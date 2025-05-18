@@ -1,34 +1,35 @@
-import torch.multiprocessing as mp
+import os
+import uuid
+from datetime import datetime
+from typing import List, Tuple
+
 import h5py
 import numpy as np
 import pandas
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
+from IPython.display import clear_output
+from sklearn.metrics import roc_curve, auc
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.data import ConcatDataset
-from IPython.display import clear_output
-from sklearn.metrics import roc_curve, auc
-from typing import List, Tuple
-from datetime import datetime
-import uuid
-import os
+import torch.multiprocessing as mp
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
+
+from multiprocessing import Pool, Process, Manager
+from joblib import Parallel, delayed
 
 import tunka_data_prep
 import importlib
 import tunka_nn
 
-importlib.reload(tunka_nn)
-importlib.reload(tunka_data_prep)
-
 def train_model(model_class,
                 optim_class, optim_kwargs,
                 crit_class, crit_kwargs,
                 sched_class, sched_kwargs,
-                epochs, seed, gpu_id=0, fold=0):
+                epochs, seed, results_path, gpu_id=0, fold=0):
 
     """
     Реализует пайплайн обучения отдельной модели, нужно для параллельного обучения нескольких моделей
@@ -172,18 +173,198 @@ def train_model(model_class,
     )
     ax_info.text(0, 1, text, va='top', ha='left', fontfamily='monospace')
 
-    os.makedirs("Pics", exist_ok=True)
+    base_dir = os.path.dirname(results_path)
+    pics_dir = os.path.join(base_dir, "pics")
+    os.makedirs(pics_dir, exist_ok=True)
 
-    # plt.tight_layout()
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    uid = uuid.uuid4().hex[:8]
-    filename = f"loss_{model_name}_{seed}_{ts}_{uid}.png"
-    filepath = os.path.join("Pics", filename)
+    ts_fig = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    uid_fig = uuid.uuid4().hex[:8]
+    filename = f"loss_{model_name}_{seed}_{ts_fig}_{uid_fig}.png"
+    filepath = os.path.join(pics_dir, filename)
+
     plt.savefig(filepath)
-    plt.close()
+    plt.close(fig)
 
     metric_loss = tunka_nn.evaluate(model, test_loader, criterion = criterion)
     ksi_opt,  metric_n = tunka_nn.evaluate_n(model, test_loader)
 
     return model, metric_loss, metric_n, ksi_opt
+
+
+def train_parallel(
+    model_class,
+    opt_cfg,
+    crit_cfg,
+    sched_cfg,
+    n_models: int,
+    folds: int,
+    seeds: list,
+    epochs: int
+):
+    """
+    Параллельное обучение по k‑fold. 
+    - model_class: класс модели (наследник nn.Module)
+    - opt_cfg: tuple (OptimizerClass, optimizer_kwargs)
+    - crit_cfg: tuple (CriterionClass, criterion_kwargs)
+    - sched_cfg: tuple (SchedulerClass or None, scheduler_kwargs)
+    - n_models: число параллельно обучаемых моделей (число сидов) на каждом фолде
+    - folds: количество фолдов (целое число)
+    - seeds: список из n_models целых значений random seed
+    - epochs: число эпох обучения
+
+    Внутри создаётся папка train_logs/<timestamp>/, в неё пишется train_results.txt,
+    графики лоссов сохраняются в pics, сохраняется картинка с метриками для каждого разбиения.
+    Для каждого разбиения используется n_models сидов.
+    
+    """
+
+    def train_and_evaluate(seed, results_path, epochs, fold=0):
+        model, metric_loss, metric_n, ksi_opt = train_model(
+            model_class,
+            opt_cfg[0], opt_cfg[1],
+            crit_cfg[0], crit_cfg[1],
+            sched_cfg[0], sched_cfg[1],
+            epochs=epochs,
+            seed=seed,
+            fold=fold,
+            results_path=results_path
+        )
+        return metric_loss, metric_n, ksi_opt
+
+    ts_main = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base_dir = os.path.join("train_logs", ts_main)
+    os.makedirs(base_dir, exist_ok=True)
+
+    results_path = os.path.join(base_dir, "train_results.txt")
+
+    mean_loss_folds = []
+    std_loss_folds = []
+
+    mean_n_folds = []
+    std_n_folds = []
+
+    ksi_mean_folds = []
+    ksi_std_folds = []
+
+    with open(results_path, "w") as f:
+        for fold_idx in range(1, folds + 1):
+            results = Parallel(n_jobs=n_models)(
+                delayed(train_and_evaluate)(
+                    seed=seeds[i],
+                    results_path=results_path,
+                    epochs=epochs,
+                    fold=fold_idx
+                ) for i in range(n_models)
+            )
+
+            metrics = np.array(results, dtype=object)  # shape = (n_models, 3)
+            losses = metrics[:, 0].astype(float)
+            ns = metrics[:, 1].astype(float)
+            ksi_opts = metrics[:, 2]
+
+            mean_loss = losses.mean()
+            std_loss = losses.std(ddof=1)
+            mean_n = ns.mean()
+            std_n = ns.std(ddof=1)
+            mean_ksi = np.mean(ksi_opts)
+            std_ksi = np.std(ksi_opts)
+
+            mean_loss_folds.append(mean_loss)
+            std_loss_folds.append(std_loss)
+
+            mean_n_folds.append(mean_n)
+            std_n_folds.append(std_n)
+
+            ksi_mean_folds.append(mean_ksi)
+            ksi_std_folds.append(std_ksi)
+
+            f.write(f"Fold: {fold_idx}\n")
+            f.write(f"Лоссы:              {losses}\n")
+            f.write(f"Средний лосс:       {mean_loss:.4f} ± {std_loss:.4f}\n")
+            f.write(f"n=sigma_95/s:       {ns}\n")
+            f.write(f"Средняя метрика n:  {mean_n:.4f} ± {std_n:.4f}\n")
+            f.write(f"ksi_opts:           {ksi_opts}\n\n")
+
+    model_name = model_class.__name__
+
+    fig = plt.figure(figsize=(10, 8), constrained_layout=True)
+    gs = fig.add_gridspec(nrows=3, ncols=2, width_ratios=[3, 1], wspace=0.4)
+
+    ax_loss = fig.add_subplot(gs[0, 0])
+    ax_n = fig.add_subplot(gs[1, 0])
+    ax_ksi = fig.add_subplot(gs[2, 0])
+    ax_info = fig.add_subplot(gs[:, 1])
+
+    num_folds = np.arange(1, folds + 1)
+
+    ax_loss.errorbar(
+        num_folds,
+        mean_loss_folds,
+        yerr=std_loss_folds,
+        fmt='o',
+        capsize=5,
+        label='Loss'
+    )
+    ax_loss.set_ylabel('Средний лосс')
+    ax_loss.set_title('Loss по фолдам')
+    ax_loss.grid(True)
+    ax_loss.legend()
+
+    ax_n.errorbar(
+        num_folds,
+        mean_n_folds,
+        yerr=std_n_folds,
+        fmt='o',
+        capsize=5,
+        color='orange',
+        label='n = σ₉₅ / s'
+    )
+    ax_n.set_ylabel('Среднее n')
+    ax_n.set_title('n = σ₉₅ / s по фолдам')
+    ax_n.grid(True)
+    ax_n.legend()
+
+    ax_ksi.errorbar(
+        num_folds,
+        ksi_mean_folds,
+        yerr=ksi_std_folds,
+        fmt='o',
+        capsize=5,
+        color='green',
+        label='ξₒₚₜ'
+    )
+    ax_ksi.set_xlabel('Фолд')
+    ax_ksi.set_ylabel('ξₒₚₜ')
+    ax_ksi.set_title('ξₒₚₜ по фолдам')
+    ax_ksi.grid(True)
+    ax_ksi.legend()
+
+    ax_info.axis('off')
+
+    def fmt(d):
+        return "\n".join(f"{k}={v}" for k, v in d.items())
+
+    text = (
+        f"Model: {model_name}\n\n"
+        f"Opt:   {opt_cfg[0].__name__}\n"
+        f"{fmt(opt_cfg[1])}\n\n"
+        f"Crit:  {crit_cfg[0].__name__}\n"
+        f"{fmt(crit_cfg[1])}\n\n"
+        f"Sched: {sched_cfg[0].__name__ if sched_cfg[0] else 'None'}\n"
+        f"{fmt(sched_cfg[1]) if sched_cfg[0] else ''}\n\n"
+        f"Epochs: {epochs}\n"
+        f"n_models: {n_models}"
+    )
+
+    ax_info.text(0, 1, text, va="top", ha="left", fontfamily="monospace")
+
+    ts_fig = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    uid_fig = uuid.uuid4().hex[:8]
+    filename_fig = f"fold_metrics_{model_name}_{ts_fig}_{uid_fig}.png"
+    filepath_fig = os.path.join(base_dir, filename_fig)
+
+    plt.savefig(filepath_fig)
+    plt.close(fig)
+
+    print(f"Done. Все файлы сохранены в папке: {base_dir}")
 
