@@ -248,6 +248,16 @@ def evaluate_n(model, test_loader):
         lower = 0.0 if n == 0 else poisson.ppf(alpha / 2, n)
         upper = poisson.ppf(1 - alpha / 2, n + 1)
         return lower, upper
+
+    # финальная функция
+    def get_upper_poisson_95(num):
+        fc_coeff = [3.09,5.14,6.72,8.25,9.76,11.26,12.75,13.81,15.29,16.77,17.82,19.29,20.34,21.80,22.94,24.31,25.40,26.84,27.84,29.31,30.33]
+        if num<21:
+            return fc_coeff[num]
+        elif num>21:
+            return num+2*np.sqrt(num)
+        else:
+            return 30.855
     
     # сортируем по возрастанию, чтобы можно было применять бин. поиск
     preds_class_gamma = sorted(preds_class_0)
@@ -268,7 +278,7 @@ def evaluate_n(model, test_loader):
         ind_left_proton = bisect.bisect_left(preds_class_proton, ksi)
         n_gamma_cand_mk = len(preds_class_proton) - ind_left_proton
         
-        sigma_95 = poisson_conf_interval(n_gamma_cand_mk)[1]
+        sigma_95 = get_upper_poisson_95(n_gamma_cand_mk)
         f = sigma_95 / s
         
         if f < F_min:
