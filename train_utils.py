@@ -11,6 +11,7 @@ import os
 import random
 from tqdm import tqdm
 import pandas as pd
+from itertools import cycle
 
 def smooth(values, window=10):
     values = np.array(values)
@@ -156,13 +157,25 @@ def set_seed(seed: int):
     # при необходимости:
     # torch.use_deterministic_algorithms(True)
 
+def dann_lambda(step, total_steps, lmax=1.0):
+    # функция из оригинальной статьи про unsupervised da: 2/(1+exp(-10p)) - 1
+    p = step / float(total_steps)
+    return lmax * (2.0 / (1.0 + torch.exp(torch.tensor(-10.0 * p))) - 1.0).item()
 
 def train_eval(model, train_loader, loss_fn, optimizer, epochs, device, val_loader, graph_every, eval_every, window, save_path,
-              fix_threshold=False, threshold=-1.0, scheduler=None):
+              fix_threshold=False, threshold=-1.0, scheduler=None, 
+              domain_adapt=False, expr_loader=None, loss_fn_dom=None):
     step = 0
-    train_losses = [] # по шагам (1 батч - 1 шаг)
-    eval_steps = []
-    eval_losses = []
+    total_steps = len(train_loader) * epochs
+
+    train_cls_losses = [] # по шагам (1 батч - 1 шаг)
+    eval_cls_steps = []
+    eval_cls_losses = []
+    if domain_adapt:
+        train_dom_losses = []
+        assert expr_loader is not None, "Select expr_loader"
+        assert loss_fn_dom is not None, "Select loss_fn_dom"
+        expr_iter = cycle(expr_loader)
 
     assert window % 2 != 0, "Select an odd window size"
 
@@ -178,33 +191,72 @@ def train_eval(model, train_loader, loss_fn, optimizer, epochs, device, val_load
             model.train()
             step += 1
             optimizer.zero_grad()
-    
+
             image = image.to(device)
             features = features.to(device)
-            logits = model(image, features)
-    
             labels = labels.to(device).long().squeeze(-1)
+
+            if not domain_adapt:
+                logits = model(image, features)
+                loss = loss_fn(logits, labels)
+                train_cls_losses.append(loss.item())
+                
+            else:
+                image_expr, features_expr, labels_expr = next(expr_iter)
+                image_expr = image_expr.to(device)
+                features_expr = features_expr.to(device)
     
-            loss = loss_fn(logits, labels)
+                # собираем общий батч
+                image_all = torch.cat([image, image_expr], dim=0)
+                features_all = torch.cat([features, features_expr], dim=0)
+        
+                # доменные метки: 0=mk, 1=expr
+                dom_labels = torch.cat([
+                    torch.zeros(image.size(0), dtype=torch.long),
+                    torch.ones(image_expr.size(0), dtype=torch.long)
+                ], dim=0).to(device)
+    
+                alpha = dann_lambda(step, total_steps)
+    
+                cls_logits, dom_logits = model(image_all, features_all, alpha=alpha)
+    
+                # лосс по меткам только на source части
+                loss_cls = loss_fn(cls_logits[:image.size(0)], labels)
+                train_cls_losses.append(loss_cls.item())
+        
+                # лосс по доменам на всем батче
+                loss_dom = loss_fn_dom(dom_logits, dom_labels)
+                train_dom_losses.append(loss_dom.item())
+    
+                # общий лосс
+                loss = loss_cls + loss_dom
+                
             loss.backward()
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
-    
-            train_losses.append(loss.item())
 
+            
             if (step % graph_every) == 0:
                 plt.figure(figsize=(10, 4))
 
-                train_steps = np.arange(1,len(train_losses)+1)
-                plt.plot(train_steps, train_losses, color='blue', label='train', alpha=0.3)
-
-                if len(train_losses) >= window:
-                    smoothed_steps = np.arange(window//2+1, len(train_losses)-window//2 + 1)
-                    smoothed = smooth(train_losses, window)
-                    plt.plot(smoothed_steps, smoothed, color='orange', label='avg_train',)
+                train_steps = np.arange(1,len(train_cls_losses)+1)
+                plt.plot(train_steps, train_cls_losses, color='blue', label='train', alpha=0.3)
                 
-                plt.plot(eval_steps, eval_losses, 'x', color='red', label='valid')
+                if domain_adapt:
+                    assert len(train_cls_losses) == len(train_dom_losses), "len(train_cls_losses) != len(train_dom_losses)"
+                    plt.plot(train_steps, train_dom_losses, color='grey', label='dom', alpha=0.3)
+
+                if len(train_cls_losses) >= window:
+                    smoothed_steps = np.arange(window//2+1, len(train_cls_losses)-window//2 + 1)
+                    smoothed = smooth(train_cls_losses, window)
+                    plt.plot(smoothed_steps, smoothed, color='orange', label='avg_train')
+
+                    if domain_adapt:
+                        smoothed_dom = smooth(train_dom_losses, window)
+                        plt.plot(smoothed_steps, smoothed_dom, color='green', label='avg_dom')
+                
+                plt.plot(eval_cls_steps, eval_cls_losses, 'x', color='red', label='valid')
                 plt.xlabel("Training steps")
                 plt.ylabel("Loss")
                 plt.title(f"Loss: step {step}, epoch {epoch+1}")
@@ -222,8 +274,12 @@ def train_eval(model, train_loader, loss_fn, optimizer, epochs, device, val_load
                     for images, features, labels in val_loader:
                         images = images.to(device)
                         features = features.to(device)
-                        logits = model(images, features)               # логиты (batch, num_classes)
-                        probs = F.softmax(logits, dim=1)[:, 1]          # вероятности второго класса
+
+                        if not domain_adapt:
+                            logits = model(images, features)
+                        else:
+                            logits = model(images, features)[0] # cls логиты (batch, num_classes)
+                        probs = F.softmax(logits, dim=1)[:, 1] # вероятности второго класса
                         preds_all.append(probs.cpu().numpy())
                             
                         labels = labels.to(device).long().squeeze(-1)
@@ -247,16 +303,16 @@ def train_eval(model, train_loader, loss_fn, optimizer, epochs, device, val_load
                 else:
                     ksi_opt, s_opt, n_ksi_min = find_n_ksi(preds_all, labels_all, fix_threshold, threshold)
 
-                eval_steps.append(step)
+                eval_cls_steps.append(step)
                 eval_loss = running_loss / len(val_loader.dataset)
-                eval_losses.append(eval_loss)
+                eval_cls_losses.append(eval_loss)
 
                 with open(log_path, "a", newline="") as f:
                     writer = csv.DictWriter(f, fieldnames=[
                         "train_loss","test_loss", "ksi_opt", "s_opt", "n_ksi_min"
                     ])
                     writer.writerow({
-                        "train_loss": f"{train_losses[-1]:.4f}",
+                        "train_loss": f"{train_cls_losses[-1]:.4f}",
                         "test_loss": f"{eval_loss:.4f}",
                         "ksi_opt": f"{ksi_opt:.3f}",
                         "s_opt": f"{s_opt:.3f}",

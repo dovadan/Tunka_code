@@ -359,7 +359,7 @@ def get_train_test_kfold(init_file: str, new_file: str, fold: int, fill_value: f
             proton_indeces_batch = sorted(proton_indeces[start:end])
 
             # загружаем батч данных
-            gamma_headers = hdf5_file['gamma/headers'][gamma_indeces_batch, :] # (batch_size_gamma, num_table_features=9+2)
+            gamma_headers = hdf5_file['gamma/headers'][gamma_indeces_batch, :] # (batch_size_gamma, num_table_features)
             gamma_headers = gamma_headers[:, table_features] 
             gamma_data_blocks = hdf5_file['gamma/data_blocks'][gamma_indeces_batch]
             gamma_labels = np.ones((len(gamma_indeces_batch),1))
@@ -711,13 +711,14 @@ def get_expr(input_path: str, output_path: str, fill_value: float = -1.0, batch_
 
 
 
-def get_mean_std_tb(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tuple[float, float]]:
+def get_mean_std_tb(hdf5_filename: str, skip_ind: Dict[int, float], test=False) -> List[Tuple[float, float]]:
     """
-    Батчами вычисляем среднее и стандартное отклонение для всех табличных признаков без учета пропущенных значений
+    Батчами вычисляем среднее и стандартное отклонение на трейне для всех табличных признаков без учета пропущенных значений
 
     Args:
     hdf5_filename - название h5-файла с train и test датасетами
     skip_ind - индексы табличных признаков (из headers), где есть пропущенные значения (номер индекса в headers: значение)
+    test - считать на тестовой выборке (нужно для проверки сдвига распределений трейна и теста)
 
     Return:
     List[Tuple[float, float]] - массив размером (len(features_indeces), 2), (среднее, стандартное отклонение)
@@ -726,8 +727,13 @@ def get_mean_std_tb(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tupl
 
     with h5py.File(hdf5_filename, "r") as hdf5_file:
         batch_size = 10000
-        train_len = hdf5_file['train']['headers'].shape[0]
-        num_feats = hdf5_file['train']['headers'].shape[1]
+
+        if test:
+            train_len = hdf5_file['test']['headers'].shape[0]
+            num_feats = hdf5_file['test']['headers'].shape[1]
+        else:
+            train_len = hdf5_file['train']['headers'].shape[0]
+            num_feats = hdf5_file['train']['headers'].shape[1]
 
         mean_std = []
         for feature_index in range(num_feats):
@@ -737,7 +743,10 @@ def get_mean_std_tb(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tupl
             
             if feature_index in skip_ind.keys():
                 for i in range(0, train_len, batch_size):
-                    batch = hdf5_file['train']['headers'][i:i+batch_size, feature_index]
+                    if test:
+                        batch = hdf5_file['test']['headers'][i:i+batch_size, feature_index]
+                    else:
+                        batch = hdf5_file['train']['headers'][i:i+batch_size, feature_index]
                     mask = batch != skip_ind[feature_index]
                     valid = batch[mask]
     
@@ -756,7 +765,10 @@ def get_mean_std_tb(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tupl
                 
             else:
                 for i in range(0, train_len, batch_size):
-                    batch = hdf5_file['train']['headers'][i:i+batch_size, feature_index]
+                    if test:
+                        batch = hdf5_file['test']['headers'][i:i+batch_size, feature_index]
+                    else:
+                        batch = hdf5_file['train']['headers'][i:i+batch_size, feature_index]
                     sum_x += np.sum(batch)
                     sum_x2 += np.sum(batch ** 2)
                     count += len(batch)
@@ -769,13 +781,14 @@ def get_mean_std_tb(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tupl
     return mean_std
 
 
-def get_mean_std_ch(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tuple[float, float]]:
+def get_mean_std_ch(hdf5_filename: str, skip_ind: Dict[int, float], test=False) -> List[Tuple[float, float]]:
     """
-    Батчами вычисляем среднее и стандартное отклонение для всех 2d-признаков без учета пропущенных значений
+    Батчами вычисляем среднее и стандартное отклонение на трейне для всех 2d-признаков без учета пропущенных значений
 
     Args:
     hdf5_filename - название h5-файла с train и test датасетами
     skip_ind - индексы 2d-признаков (из pics), где есть пропущенные значения (номер канала: значение)
+    test - считать на тестовой выборке (нужно для проверки сдвига распределений трейна и теста)
 
     Return:
     List[Tuple[float, float]] - массив размером (len(features_indeces), 2), (среднее, стандартное отклонение)
@@ -784,10 +797,18 @@ def get_mean_std_ch(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tupl
 
     with h5py.File(hdf5_filename, "r") as hdf5_file:
         batch_size = 10000
-        train_len = hdf5_file['train']['pics'].shape[0]
-        num_feats = hdf5_file['train']['pics'].shape[1]
-        h = hdf5_file['train']['pics'].shape[2]
-        w = hdf5_file['train']['pics'].shape[3]
+
+        if test:
+            train_len = hdf5_file['test']['pics'].shape[0]
+            num_feats = hdf5_file['test']['pics'].shape[1]
+            h = hdf5_file['test']['pics'].shape[2]
+            w = hdf5_file['test']['pics'].shape[3]
+        else:
+            train_len = hdf5_file['train']['pics'].shape[0]
+            num_feats = hdf5_file['train']['pics'].shape[1]
+            h = hdf5_file['train']['pics'].shape[2]
+            w = hdf5_file['train']['pics'].shape[3]
+            
 
         mean_std = []
         for feature_index in range(num_feats):
@@ -797,7 +818,10 @@ def get_mean_std_ch(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tupl
             
             if feature_index in skip_ind.keys():
                 for i in range(0, train_len, batch_size):
-                    batch = hdf5_file['train']['pics'][i:i+batch_size, feature_index] # (batch_size, 5, 5)
+                    if test:
+                        batch = hdf5_file['test']['pics'][i:i+batch_size, feature_index] # (batch_size, 5, 5)
+                    else:
+                        batch = hdf5_file['train']['pics'][i:i+batch_size, feature_index] # (batch_size, 5, 5)
                     mask = batch != skip_ind[feature_index]
                     valid = batch[mask]
     
@@ -816,7 +840,10 @@ def get_mean_std_ch(hdf5_filename: str, skip_ind: Dict[int, float]) -> List[Tupl
                 
             else:
                 for i in range(0, train_len, batch_size):
-                    batch = hdf5_file['train']['pics'][i:i+batch_size, feature_index] # (batch_size, 5, 5)
+                    if test:
+                        batch = hdf5_file['test']['pics'][i:i+batch_size, feature_index] # (batch_size, 5, 5)
+                    else:
+                        batch = hdf5_file['train']['pics'][i:i+batch_size, feature_index] # (batch_size, 5, 5)
                     sum_x += np.sum(batch)
                     sum_x2 += np.sum(batch ** 2)
                     count += batch.shape[0]*h*w
